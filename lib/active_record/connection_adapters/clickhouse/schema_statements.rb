@@ -119,7 +119,15 @@ module ActiveRecord
 
         def do_execute(sql, name = nil, format: DEFAULT_RESPONSE_FORMAT, settings: {})
           log(sql, "#{adapter_name} #{name}") do
-            res = request(sql, format, settings)
+            retries = 2
+            begin
+              res = request(sql, format, settings)
+            rescue EOFError, Errno::ECONNRESET => e
+              retries -= 1
+              retry if retries > 0
+              raise e
+            end
+
             process_response(res, format, sql)
           end
         end
