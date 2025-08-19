@@ -10,6 +10,9 @@ require 'core_extensions/arel/nodes/select_core'
 require 'core_extensions/arel/nodes/select_statement'
 require 'core_extensions/arel/select_manager'
 require 'core_extensions/arel/table'
+require 'core_extensions/active_record/insert_all'
+require 'core_extensions/active_record/insert_all/builder'
+
 
 if defined?(Rails::Railtie)
   require 'clickhouse-activerecord/railtie'
@@ -26,9 +29,16 @@ module ClickhouseActiverecord
     ActiveRecord::Relation.prepend(CoreExtensions::ActiveRecord::Relation)
     ActiveRecord::SchemaMigration.prepend(CoreExtensions::ActiveRecord::SchemaMigration)
 
+    # Select extensions
     Arel::Nodes::SelectCore.prepend(CoreExtensions::Arel::Nodes::SelectCore)
     Arel::Nodes::SelectStatement.prepend(CoreExtensions::Arel::Nodes::SelectStatement)
     Arel::SelectManager.prepend(CoreExtensions::Arel::SelectManager)
+
+    # Insert extensions
+    ActiveRecord::InsertAll.prepend(CoreExtensions::ActiveRecord::InsertAll)
+    ActiveRecord::InsertAll::Builder.prepend(CoreExtensions::ActiveRecord::InsertAll::Builder)
+
+    # Table extensions
     Arel::Table.prepend(CoreExtensions::Arel::Table)
   end
 end
