@@ -31,8 +31,9 @@ RSpec.describe 'ActiveRecord::ConnectionAdapters::ClickhouseAdapter' do
         connection.select_value(count)
         connection.select_value(max)
 
-        expect(connection).not_to receive(:request)
+        allow(connection).to receive(:request).and_call_original
         connection.select_value(count)
+        expect(connection).not_to have_received(:request)
       end
     end
   end
