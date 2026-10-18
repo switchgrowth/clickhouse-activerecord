@@ -41,7 +41,7 @@ module ActiveRecord
           unsigned = options[:unsigned]
           unsigned = true if unsigned.nil?
 
-          kind = :uint32 # default
+          kind = unsigned ? :uint32 : :int32 # default
 
           if options[:limit]
             if unsigned
@@ -61,6 +61,12 @@ module ActiveRecord
             end
           end
           args.each { |name| column(name, kind, **options.except(:limit, :unsigned)) }
+        end
+
+        def float(*args, **options)
+          kind = options[:limit] == 8 ? :float64 : :float
+
+          args.each { |name| column(name, kind, **options.except(:limit)) }
         end
 
         def datetime(*args, **options)

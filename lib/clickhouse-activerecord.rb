@@ -40,5 +40,15 @@ module ClickhouseActiverecord
 
     # Table extensions
     Arel::Table.prepend(CoreExtensions::Arel::Table)
+
+    # Prevent TimeZoneConverter wrapping for Map OID with DateTime subtype.
+    # Map(String, DateTime) would crash with "Hash values are not supported"
+    # when TimeZoneConverter tries to convert Hash values.
+    ActiveRecord::AttributeMethods::TimeZoneConversion::ClassMethods.prepend(Module.new do
+      def create_time_zone_conversion_attribute?(name, cast_type)
+        return false if cast_type.is_a?(ActiveRecord::ConnectionAdapters::Clickhouse::OID::Map)
+        super
+      end
+    end)
   end
 end
