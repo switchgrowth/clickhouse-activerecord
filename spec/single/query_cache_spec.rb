@@ -23,5 +23,17 @@ RSpec.describe 'ActiveRecord::ConnectionAdapters::ClickhouseAdapter' do
         expect(connection.select_value(count).to_i).to eq(1)
       end
     end
+
+    it 'keeps the cached reads when another read misses the cache' do
+      max = 'SELECT max(id) FROM query_cache_test'
+
+      ActiveRecord::Base.cache do
+        connection.select_value(count)
+        connection.select_value(max)
+
+        expect(connection).not_to receive(:request)
+        connection.select_value(count)
+      end
+    end
   end
 end
