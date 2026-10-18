@@ -86,9 +86,7 @@ module ActiveRecord
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false, allow_retry: false)
           connection_retries = 0
           begin
-            # Not `execute`: it clears the query cache of every connection pool on the
-            # thread, and `select_all` reaches this method for every cache miss. Writes
-            # through the public `exec_query` still clear it, by Rails' own wrapper.
+            # `select_all` reaches here on each cache miss, so this must not clear the cache.
             result = execute_statement(sql, name)
             columns = result['meta'].map { |m| m['name'] }
             types = {}
@@ -321,6 +319,9 @@ module ActiveRecord
           (%r{\w+\(.*\)} === default)
         end
 
+        # The body of `execute`, without the wrapper ClickhouseAdapter puts on `execute`
+        # to clear the query cache of every connection pool on the thread. Reads use this;
+        # writes through `exec_query` still clear the cache by Rails' own wrapper.
         def execute_statement(sql, name = nil, format: response_format, settings: {})
           with_response_format(format) do
             log(sql, [adapter_name, name].compact.join(' ')) do
