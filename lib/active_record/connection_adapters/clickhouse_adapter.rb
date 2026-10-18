@@ -616,7 +616,7 @@ module ActiveRecord
       end
 
       def build_insert_sql(insert) # :nodoc:
-        ["INSERT", insert.into, insert.settings_list, insert.values_list].compact.join(" ")
+        ['INSERT', insert.into, insert.settings_list, insert.values_list].compact.join(' ')
       end
 
       protected
