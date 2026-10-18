@@ -96,6 +96,51 @@ RSpec.describe 'Migration', :migrations do
         end
 
         context 'types' do
+          context 'integer' do
+            let(:directory) { 'dsl_table_with_integer_creation' }
+            it 'honors unsigned: false even when limit is omitted' do
+              subject
+
+              current_schema = schema(model)
+
+              expect(current_schema['default_int'].sql_type).to eq('Nullable(UInt32)')
+              expect(current_schema['signed_no_limit'].sql_type).to eq('Int32')
+              expect(current_schema['signed_no_limit'].default).to eq(-1)
+              expect(current_schema['signed_small'].sql_type).to eq('Int8')
+              expect(current_schema['signed_small'].default).to eq(-1)
+              expect(current_schema['signed_int32'].sql_type).to eq('Int32')
+              expect(current_schema['signed_int32'].default).to eq(-1)
+              expect(current_schema['signed_int64'].sql_type).to eq('Int64')
+              expect(current_schema['signed_int64'].default).to eq(-1)
+              expect(current_schema['unsigned_tiny'].sql_type).to eq('UInt8')
+            end
+          end
+
+          context 'float' do
+            let(:directory) { 'dsl_table_with_float_creation' }
+            it 'resolves the width by limit and keeps it in the schema dump' do
+              subject
+
+              current_schema = schema(model)
+
+              expect(current_schema['default_float'].sql_type).to eq('Nullable(Float32)')
+              expect(current_schema['float32'].sql_type).to eq('Float32')
+              expect(current_schema['float64'].sql_type).to eq('Float64')
+              expect(current_schema['nullable_float64'].sql_type).to eq('Nullable(Float64)')
+
+              require 'clickhouse-activerecord/schema_dumper'
+
+              dumped = StringIO.new
+              ClickhouseActiverecord::SchemaDumper.dump(ActiveRecord::Base.connection, dumped)
+
+              expect(dumped.string).to include('t.float "default_float"')
+              expect(dumped.string).not_to include('t.float "default_float", limit')
+              expect(dumped.string).to include('t.float "float32", default: 0.0, null: false')
+              expect(dumped.string).to include('t.float "float64", limit: 8, default: 0.0, null: false')
+              expect(dumped.string).to include('t.float "nullable_float64", limit: 8')
+            end
+          end
+
           context 'decimal' do
             let(:directory) { 'dsl_table_with_decimal_creation' }
             it 'creates a table with valid scale and precision' do
@@ -311,6 +356,25 @@ RSpec.describe 'Migration', :migrations do
 
             ActiveRecord::Base.connection.clear_index('some', 'idx2')
           end
+
+          it 'dumps indexes' do
+            require 'clickhouse-activerecord/schema_dumper'
+
+            quietly { migration_context.up(1) }
+
+            current_schema = StringIO.new
+            ClickhouseActiverecord::SchemaDumper.dump(ActiveRecord::Base.connection, current_schema)
+
+            expect(current_schema.string).to include('t.index "(int1 * int2, date)", name: "idx", type: "minmax", granularity: 3')
+
+            quietly { migration_context.up(4) }
+
+            current_schema = StringIO.new
+            ClickhouseActiverecord::SchemaDumper.dump(ActiveRecord::Base.connection, current_schema)
+
+            expect(current_schema.string).to include('t.index "int1 * int2", name: "idx2", type: "set(10)", granularity: 4')
+            expect(current_schema.string).to include('t.index "date", name: "simple_idx", type: "minmax", granularity: 1')
+          end
         end
       end
     end
@@ -355,6 +419,18 @@ RSpec.describe 'Migration', :migrations do
         expect(current_schema['id'].sql_type).to eq('UInt32')
         expect(current_schema['date'].sql_type).to eq('Date')
         expect(current_schema['new_column'].sql_type).to eq('Nullable(UInt64)')
+      end
+    end
+
+    describe 'add float column' do
+      let(:directory) { 'dsl_add_float64_column' }
+      it 'resolves the width by limit' do
+        subject
+
+        current_schema = schema(model)
+
+        expect(current_schema['float32'].sql_type).to eq('Float32')
+        expect(current_schema['float64'].sql_type).to eq('Float64')
       end
     end
 

@@ -9,12 +9,15 @@ RSpec.describe 'Model', :migrations do
   class Model < ActiveRecord::Base
     self.table_name = 'sample'
     has_many :joins, class_name: 'ModelJoin', primary_key: 'event_name'
+    # Self-referential association to the sample table (a ReplacingMergeTree,
+    # which supports FINAL) so the FINAL join can actually be executed.
+    has_many :twins, class_name: 'Model', foreign_key: 'event_name', primary_key: 'event_name'
   end
   class ModelPk < ActiveRecord::Base
     self.table_name = 'sample'
     self.primary_key = 'event_name'
   end
-  IS_NEW_CLICKHOUSE_SERVER = Model.connection.server_version.to_f >= 23.4
+  IS_NEW_CLICKHOUSE_SERVER = Gem::Version.new(Model.connection.server_version) >= Gem::Version.new('23.4')
 
   let(:date) { Date.today }
 
@@ -425,6 +428,106 @@ RSpec.describe 'Model', :migrations do
       end
     end
 
+    describe '#joins_final' do
+      it 'adds FINAL to the joined table' do
+        sql = Model.joins_final(:joins).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample INNER JOIN joins FINAL ON joins.model_id = sample.event_name')
+      end
+
+      it 'applies FINAL to both the FROM table and the join when combined with #final' do
+        sql = Model.final.joins_final(:joins).where(date: '2023-07-21').to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample FINAL INNER JOIN joins FINAL ON joins.model_id = sample.event_name WHERE sample.date = \'2023-07-21\'')
+      end
+
+      it 'does not duplicate a join already added via #joins' do
+        sql = Model.joins(:joins).joins_final(:joins).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample INNER JOIN joins FINAL ON joins.model_id = sample.event_name')
+      end
+
+      it 'does not add FINAL to the FROM table on its own' do
+        sql = Model.joins_final(:joins).to_sql
+        expect(sql).not_to match(/FROM sample FINAL/)
+      end
+
+      it 'can be removed with unscope, keeping the plain join' do
+        sql = Model.joins_final(:joins).unscope(:joins_final).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample INNER JOIN joins ON joins.model_id = sample.event_name')
+      end
+
+      it 'is chainable (returns a relation)' do
+        expect(Model.joins_final(:joins)).to be_a(ActiveRecord::Relation)
+      end
+
+      it 'executes against ClickHouse and merges the FINAL-joined table' do
+        Model.create!(date: date, event_name: 'final-join')
+        Model.create!(date: date, event_name: 'final-join')
+
+        relation = Model.final.joins_final(:twins).where(sample: { event_name: 'final-join' })
+        expect(relation.to_sql).to include('FINAL ON')
+        # The sample table is a ReplacingMergeTree: FINAL dedups the two rows to
+        # one on both the FROM side and the self-joined side, so the join
+        # produces a single row.
+        expect(relation.count).to eq(1)
+      end
+    end
+
+    describe '#left_joins_final' do
+      it 'adds FINAL to a LEFT OUTER joined table' do
+        sql = Model.left_joins_final(:joins).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample LEFT OUTER JOIN joins FINAL ON joins.model_id = sample.event_name')
+      end
+
+      it 'applies FINAL to both the FROM table and the left join when combined with #final' do
+        sql = Model.final.left_joins_final(:joins).where(date: '2023-07-21').to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample FINAL LEFT OUTER JOIN joins FINAL ON joins.model_id = sample.event_name WHERE sample.date = \'2023-07-21\'')
+      end
+
+      it 'does not duplicate a join already added via #left_outer_joins' do
+        sql = Model.left_outer_joins(:joins).left_joins_final(:joins).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample LEFT OUTER JOIN joins FINAL ON joins.model_id = sample.event_name')
+      end
+
+      it 'does not add FINAL to the FROM table on its own' do
+        sql = Model.left_joins_final(:joins).to_sql
+        expect(sql).not_to match(/FROM sample FINAL/)
+      end
+
+      it 'keeps the join LEFT OUTER (does not promote to INNER)' do
+        sql = Model.left_joins_final(:joins).to_sql
+        expect(sql).to include('LEFT OUTER JOIN joins FINAL')
+        expect(sql).not_to match(/INNER JOIN joins/)
+      end
+
+      it 'can be removed with unscope, keeping the plain left join' do
+        sql = Model.left_joins_final(:joins).unscope(:joins_final).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample LEFT OUTER JOIN joins ON joins.model_id = sample.event_name')
+      end
+
+      it 'is chainable (returns a relation)' do
+        expect(Model.left_joins_final(:joins)).to be_a(ActiveRecord::Relation)
+      end
+
+      it 'collapses to a single FINAL join when the same association is also added via #joins_final' do
+        # ActiveRecord deduplicates an association present in both joins and
+        # left_outer_joins into one INNER JOIN (INNER wins), and the shared
+        # joins_final_values store dedups via |=, so FINAL is applied once.
+        sql = Model.joins_final(:joins).left_joins_final(:joins).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample INNER JOIN joins FINAL ON joins.model_id = sample.event_name')
+      end
+
+      it 'executes against ClickHouse and merges the FINAL-joined table' do
+        Model.create!(date: date, event_name: 'left-final-join')
+        Model.create!(date: date, event_name: 'left-final-join')
+
+        relation = Model.final.left_joins_final(:twins).where(sample: { event_name: 'left-final-join' })
+        expect(relation.to_sql).to include('LEFT OUTER JOIN').and include('FINAL ON')
+        # The sample table is a ReplacingMergeTree: FINAL dedups the two rows to
+        # one on both the FROM side and the self-joined side, so the join
+        # produces a single row.
+        expect(relation.count).to eq(1)
+      end
+    end
+
     describe '#limit_by' do
       it 'works' do
         sql = Model.limit_by(1, :event_name).to_sql
@@ -543,6 +646,18 @@ RSpec.describe 'Model', :migrations do
       quietly { ActiveRecord::MigrationContext.new(migrations_dir).up }
     end
 
+    describe '#array' do
+      it 'reports array columns as arrays' do
+        expect(model.columns_hash['array_datetime'].array).to be_truthy
+        expect(model.columns_hash['array_string'].array).to be_truthy
+        expect(model.columns_hash['array_int'].array).to be_truthy
+      end
+
+      it 'does not report scalar columns as arrays' do
+        expect(model.columns_hash['date'].array).to be_falsey
+      end
+    end
+
     describe '#create' do
       it 'creates a new record' do
         expect {
@@ -597,6 +712,13 @@ RSpec.describe 'Model', :migrations do
     before do
       migrations_dir = File.join(FIXTURES_PATH, 'migrations', 'add_map_datetime')
       quietly { ActiveRecord::MigrationContext.new(migrations_dir).up }
+    end
+
+    describe '#array' do
+      it 'does not report map columns as arrays' do
+        expect(model.columns_hash['map_string'].array).to be_falsey
+        expect(model.columns_hash['map_array_string'].array).to be_falsey
+      end
     end
 
     describe '#create' do
@@ -660,10 +782,186 @@ RSpec.describe 'Model', :migrations do
         expect(record.map_array_datetime['c'][0]).to eq(DateTime.parse('2022-12-05 15:22:49'))
         expect(record.map_array_datetime['c'][1]).to eq(DateTime.parse('2024-01-01 12:00:08'))
       end
+
+      it 'handles already deserialized DateTime/Time map values without re-parsing' do
+        now = Time.now
+        instance = model.instantiate({
+          'id' => '1',
+          'map_datetime' => {'t1' => now, 't2' => DateTime.now},
+          'map_date' => {'d' => Date.current},
+          'map_string' => {'x' => 'test'},
+          'map_int' => {'n' => 1},
+          'map_array_datetime' => {'a' => []},
+          'map_array_string' => {'a' => []},
+          'map_array_int' => {'a' => []},
+          'date' => Date.today
+        })
+
+        expect { instance.map_datetime }.to_not raise_error
+        expect(instance.map_datetime['t1']).to be_a(Time).or be_a(DateTime)
+        expect(instance.map_datetime['t2']).to be_a DateTime
+
+        expect { instance.map_date }.to_not raise_error
+        expect(instance.map_date['d']).to be_a Date
+      end
+    end
+
+    describe 'TimeZoneConverter compatibility' do
+      it 'does not crash when time_zone_aware_attributes is enabled' do
+        Time.use_zone('UTC') do
+          ActiveRecord::Base.time_zone_aware_attributes = true
+          model.reset_column_information
+
+          begin
+            model.create!(
+              map_datetime: {a: Time.now},
+              map_string: {a: 'test'},
+              map_int: {a: 1},
+              map_array_datetime: {a: []},
+              map_array_string: {a: []},
+              map_array_int: {a: []},
+              date: Date.today
+            )
+
+            expect { model.first.map_datetime }.to_not raise_error
+            expect(model.first.map_datetime['a']).to be_a DateTime
+          ensure
+            ActiveRecord::Base.time_zone_aware_attributes = false
+            model.reset_column_information
+          end
+        end
+      end
     end
   end
 
-  if Model.connection.server_version.to_f > 24.6
+  context 'map with float and bool' do
+    let!(:model) do
+      Class.new(ActiveRecord::Base) do
+        self.table_name = 'map_test'
+      end
+    end
+
+    before do
+      migrations_dir = File.join(FIXTURES_PATH, 'migrations', 'add_map_float_bool')
+      quietly { ActiveRecord::MigrationContext.new(migrations_dir).up }
+    end
+
+    describe 'Float subtype support' do
+      it 'creates and retrieves Float32 map values' do
+        model.create!(
+          map_float32: {a: 1.5, b: 2.7, c: 3.14},
+          map_float64: {x: 1.0, y: 2.0},
+          map_bool: {flag: true},
+          date: date
+        )
+
+        record = model.first
+        expect(record.map_float32).to be_a Hash
+        expect(record.map_float32['a']).to eq(1.5)
+        expect(record.map_float32['b']).to eq(2.7)
+        expect(record.map_float32['c']).to eq(3.14)
+      end
+
+      it 'creates and retrieves Float64 map values' do
+        model.create!(
+          map_float32: {a: 1.0},
+          map_float64: {x: 123.456789, y: 987.654321},
+          map_bool: {flag: false},
+          date: date
+        )
+
+        record = model.first
+        expect(record.map_float64).to be_a Hash
+        expect(record.map_float64['x']).to eq(123.456789)
+        expect(record.map_float64['y']).to eq(987.654321)
+      end
+
+      it 'insert with insert_all' do
+        model.insert_all([{
+          map_float32: {a: 4.5},
+          map_float64: {x: 5.5},
+          map_bool: {flag: true},
+          date: date
+        }])
+
+        record = model.first
+        expect(record.map_float32['a']).to eq(4.5)
+        expect(record.map_float64['x']).to eq(5.5)
+      end
+
+      it 'retrieves float values without quoting in SQL' do
+        model.connection.insert("INSERT INTO #{model.table_name} (id, map_float32, map_float64, map_bool, date) VALUES (1, {'price': 99.99}, {'rate': 0.075}, {'active': true}, '2022-12-06')")
+
+        record = model.first
+        expect(record.map_float32['price']).to eq(99.99)
+        expect(record.map_float64['rate']).to eq(0.075)
+      end
+    end
+
+    describe 'Bool subtype support' do
+      it 'creates and retrieves Bool map values' do
+        model.create!(
+          map_float32: {a: 1.0},
+          map_float64: {x: 1.0},
+          map_bool: {enabled: true, active: false, verified: true},
+          date: date
+        )
+
+        record = model.first
+        expect(record.map_bool).to be_a Hash
+        expect(record.map_bool['enabled']).to eq(true)
+        expect(record.map_bool['active']).to eq(false)
+        expect(record.map_bool['verified']).to eq(true)
+      end
+
+      it 'handles boolean type casting' do
+        model.create!(
+          map_float32: {a: 1.0},
+          map_float64: {x: 1.0},
+          map_bool: {flag1: 1, flag2: 0, flag3: 'true', flag4: 'false'},
+          date: date
+        )
+
+        record = model.first
+        expect(record.map_bool['flag1']).to eq(true)
+        expect(record.map_bool['flag2']).to eq(false)
+        expect(record.map_bool['flag3']).to eq(true)
+        expect(record.map_bool['flag4']).to eq(false)
+      end
+
+      it 'retrieves bool values without quoting in SQL' do
+        model.connection.insert("INSERT INTO #{model.table_name} (id, map_float32, map_float64, map_bool, date) VALUES (1, {'a': 1.0}, {'x': 1.0}, {'is_active': true, 'is_deleted': false}, '2022-12-06')")
+
+        record = model.first
+        expect(record.map_bool['is_active']).to eq(true)
+        expect(record.map_bool['is_deleted']).to eq(false)
+      end
+    end
+
+    describe 'deserialize' do
+      it 'deserializes string float values from map_float32 type' do
+        type = model.type_for_attribute('map_float32')
+        expect(type.deserialize({'price' => '1.5', 'tax' => '0.25'})).to eq({'price' => 1.5, 'tax' => 0.25})
+      end
+
+      it 'deserializes string float values from map_float64 type' do
+        type = model.type_for_attribute('map_float64')
+        expect(type.deserialize({'rate' => '123.456789'})).to eq({'rate' => 123.456789})
+      end
+
+      it 'deserializes string bool values from map_bool type' do
+        type = model.type_for_attribute('map_bool')
+        expect(type.deserialize({'a' => 'true', 'b' => 'false', 'c' => '1', 'd' => '0'})).to eq({'a' => true, 'b' => false, 'c' => true, 'd' => false})
+      end
+
+      it 'deserializes integer bool values from map_bool type' do
+        type = model.type_for_attribute('map_bool')
+        expect(type.deserialize({'a' => 1, 'b' => 0})).to eq({'a' => true, 'b' => false})
+      end
+    end
+  end
+
+  if Gem::Version.new(Model.connection.server_version) > Gem::Version.new('24.6')
     context 'json' do
       let!(:json_model) do
         Class.new(ActiveRecord::Base) do
