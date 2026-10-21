@@ -301,9 +301,9 @@ RSpec.describe 'Model', :migrations do
       end
 
       it 'applies to insert_all' do
-        sql = SqlCapture.new {
+        sql = SqlCapture.new do
           Model.settings(async_insert: 0).insert_all([{ event_name: 'some event', date: date }])
-        }.captured
+        end.captured
 
         expect(sql).to match(/\AINSERT INTO sample \(.+\) SETTINGS async_insert = 0 VALUES /)
         expect(Model.count).to eq(1)

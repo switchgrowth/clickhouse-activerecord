@@ -276,7 +276,7 @@ Action.settings(optimize_read_in_order: 1).where(date: Date.current).limit(10)
 #=> #<ActiveRecord::Relation [#<Action *** >]>
 
 Action.settings(async_insert: 1).insert_all([{ url: 'http://example.com', date: Date.current }])
-# Clickhouse Action Bulk Insert (10.3ms)  INSERT INTO actions (url,date) SETTINGS async_insert = 1 VALUES ('http://example.com', '2017-11-29')
+# Clickhouse Action Insert (10.3ms)  INSERT INTO actions (url,date) SETTINGS async_insert = 1 VALUES ('http://example.com', '2017-11-29')
 
 User.joins(:actions).using(:group_id)
 # Clickhouse User Load (10.3ms)  SELECT users.* FROM users INNER JOIN actions USING group_id
