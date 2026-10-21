@@ -13,8 +13,13 @@ module ActiveRecord
         HTTP_AUTH_X_HEADERS = :x_clickhouse_headers
         HTTP_AUTH_TYPES = [HTTP_AUTH_QUERY_PARAMS, HTTP_AUTH_BASIC, HTTP_AUTH_X_HEADERS].freeze
 
-        # Connection-level failures worth a single retry on a fresh connection.
-        RETRYABLE_CONNECTION_ERRORS = [Net::OpenTimeout, EOFError, Errno::ECONNRESET, IOError].freeze
+        # Connection-level failures after the request may have reached the server. Only reads retry
+        # on these, because sending a write again can apply it twice.
+        RETRYABLE_CONNECTION_ERRORS = [EOFError, Errno::ECONNRESET, IOError].freeze
+
+        # Failures while Net::HTTP opens the connection, before it writes the request. Nothing reached
+        # the server, so every statement, a write included, retries once on these.
+        CONNECT_ERRORS = [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED].freeze
 
         def with_settings(**settings)
           @block_settings ||= {}
@@ -343,10 +348,20 @@ module ActiveRecord
         # @param [Array] except_params
         # @return [Net::HTTPResponse]
         def request(statement, settings: {}, except_params: [])
+          connect_retries = 0
           @lock.synchronize do
-            @connection.post("/?#{settings_params(settings, except: except_params)}",
-                             statement.formatted_sql,
-                             build_request_headers(include_database: !except_params.include?(:database)))
+            begin
+              @connection.post("/?#{settings_params(settings, except: except_params)}",
+                               statement.formatted_sql,
+                               build_request_headers(include_database: !except_params.include?(:database)))
+            rescue *CONNECT_ERRORS => e
+              raise ActiveRecord::ConnectionFailed, "Response: #{e.message}" if connect_retries.positive?
+
+              # The failed open leaves the socket closed, so Net::HTTP opens a new one on the retry.
+              connect_retries += 1
+              logger&.warn("[clickhouse-activerecord] retrying statement after failing to connect (#{e.class}: #{e.message})")
+              retry
+            end
           end
         end
 
