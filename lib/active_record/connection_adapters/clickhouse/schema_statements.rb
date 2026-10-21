@@ -319,9 +319,8 @@ module ActiveRecord
           (%r{\w+\(.*\)} === default)
         end
 
-        # The body of `execute`, without the wrapper ClickhouseAdapter puts on `execute`
-        # to clear the query cache of every connection pool on the thread. Reads use this;
-        # writes through `exec_query` still clear the cache by Rails' own wrapper.
+        # `execute` without the cache-clearing wrapper ClickhouseAdapter puts on it. Not named
+        # `internal_execute`: Rails calls that with positional binds and `allow_retry:`.
         def execute_statement(sql, name = nil, format: response_format, settings: {})
           with_response_format(format) do
             log(sql, [adapter_name, name].compact.join(' ')) do
