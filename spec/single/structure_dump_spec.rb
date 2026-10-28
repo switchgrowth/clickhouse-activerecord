@@ -32,7 +32,7 @@ RSpec.describe 'Structure dump', :migrations do
     connection.tables.sort.to_h { |name| [name, connection.show_create_table(name)] }
   end
 
-  it 'loads back the same tables, and dumps them the same' do
+  it 'loads back computed columns, codecs, time zones and views, and dumps them the same' do
     connection.execute(<<~SQL)
       CREATE TABLE structure_spec (
         id UInt64,
@@ -55,15 +55,46 @@ RSpec.describe 'Structure dump', :migrations do
     expect(dump).to eq(structure)
   end
 
-  it 'keeps the database name inside a quoted string' do
+  it 'keeps a quoted string that mentions the database' do
     connection.execute(<<~SQL)
-      CREATE TABLE structure_spec (id UInt64, source String DEFAULT '#{database}.example') ENGINE = MergeTree ORDER BY id
+      CREATE TABLE structure_spec (id UInt64, source String DEFAULT 'copied from #{database}.example') ENGINE = MergeTree ORDER BY id
     SQL
 
     load_structure(dump)
 
     default = connection.select_value("SELECT default_expression FROM system.columns WHERE database = '#{database}' AND table = 'structure_spec' AND name = 'source'")
-    expect(default).to eq("'#{database}.example'")
+    expect(default).to eq("'copied from #{database}.example'")
+  end
+
+  it 'loads into a database with another name, with names qualified for that database' do
+    other = "#{database}_structure_spec"
+    connection.execute('CREATE TABLE structure_spec (id UInt64, name String) ENGINE = MergeTree ORDER BY id')
+    connection.execute(<<~SQL)
+      CREATE DICTIONARY structure_spec_dict (id UInt64, name String) PRIMARY KEY id
+      SOURCE(CLICKHOUSE(TABLE 'structure_spec')) LIFETIME(0) LAYOUT(FLAT())
+    SQL
+    connection.execute(<<~SQL)
+      CREATE VIEW structure_spec_view AS SELECT dictGet('#{database}.structure_spec_dict', 'name', id) AS name FROM structure_spec
+    SQL
+    structure = dump
+
+    connection.execute("CREATE DATABASE #{other}")
+    ActiveRecord::Base.establish_connection(ActiveRecord::Base.connection_db_config.configuration_hash.merge(database: other))
+    Tempfile.create(['structure', '.sql']) do |file|
+      file.write(structure)
+      file.flush
+      tasks.structure_load(file.path)
+    end
+
+    view = ActiveRecord::Base.connection.select_value(
+      "SELECT create_table_query FROM system.tables WHERE database = '#{other}' AND name = 'structure_spec_view'"
+    )
+    expect(view).to include("dictGet('#{other}.structure_spec_dict'")
+  ensure
+    ActiveRecord::Base.establish_connection(:default)
+    ActiveRecord::Base.connection.execute("DROP DATABASE IF EXISTS #{other}")
+    ActiveRecord::Base.connection.execute('DROP VIEW IF EXISTS structure_spec_view')
+    ActiveRecord::Base.connection.execute('DROP DICTIONARY IF EXISTS structure_spec_dict')
   end
 
   it 'loads while the server already has its user-defined functions' do

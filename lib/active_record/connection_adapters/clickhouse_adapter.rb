@@ -639,11 +639,19 @@ module ActiveRecord
 
       private
 
-      # Removes the database qualifier from the names in a statement. Quoted strings keep it, so a
-      # default or comment that mentions the database name reads the same after a load.
+      # Removes the database qualifier from the names in a statement, so it loads into a database of
+      # any name. A string that is only a qualified name, as dictGet and joinGet take, is a name too:
+      # ClickHouse qualifies it with the current database again on CREATE. Any other string, and
+      # a backquoted identifier, stays as it is.
       def remove_database_qualifier(sql)
-        qualifier = /(?<![\w.`])#{Regexp.escape(@config[:database].to_s)}\./
-        sql.split(/('(?:[^'\\]|\\.)*')/).each_with_index.map { |part, i| i.odd? ? part : part.gsub(qualifier, '') }.join
+        database = Regexp.escape(@config[:database].to_s)
+        sql.gsub(/(`(?:[^`\\]|\\.)*`)|'#{database}\.(\w+)'|('(?:[^'\\]|\\.)*')|(?<![\w.`])#{database}\./) do
+          if $1 then $1
+          elsif $2 then "'#{$2}'"
+          elsif $3 then $3
+          else ''
+          end
+        end
       end
 
       def connect
