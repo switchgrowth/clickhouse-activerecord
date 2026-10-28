@@ -400,6 +400,21 @@ class CreateDataItems < ActiveRecord::Migration[7.1]
 end
 ```
 
+Create table with `DateTime64` and computed columns. `t.datetime` without `precision` creates a `DateTime`; `materialized:` and `alias:` take the ClickHouse expression:
+
+```ruby
+class CreateEvents < ActiveRecord::Migration[7.1]
+  def change
+    create_table "events", id: false, options: "MergeTree ORDER BY happened_at", force: :cascade do |t|
+      t.datetime :happened_at, precision: 6, null: false
+      t.string :metadata, null: false
+      t.string :campaign_type, low_cardinality: true, null: false, materialized: "JSONExtractString(metadata, 'campaign_type')"
+      t.integer :hour, limit: 1, null: false, alias: "toHour(happened_at)"
+    end
+  end
+end
+```
+
 Create Buffer table with connection database name:
 
 ```ruby

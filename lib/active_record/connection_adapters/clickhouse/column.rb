@@ -9,12 +9,13 @@ module ActiveRecord
         end
 
       class Column < ActiveRecord::ConnectionAdapters::Column
-        attr_reader :codec, :default_kind
+        attr_reader :codec, :default_kind, :default_expression
 
-        def initialize(*, codec: nil, default_kind: nil, **)
+        def initialize(*, codec: nil, default_kind: nil, default_expression: nil, **)
           super
           @codec = codec
           @default_kind = ActiveSupport::StringInquirer.new(default_kind.to_s.downcase.presence || 'none')
+          @default_expression = default_expression.presence
         end
 
         def virtual?

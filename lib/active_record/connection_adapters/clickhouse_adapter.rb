@@ -224,6 +224,8 @@ module ActiveRecord
       # Resolve the float width by limit here so that add_column / change_column behave like TableDefinition#float.
       def type_to_sql(type, limit: nil, precision: nil, scale: nil, **)
         return native_database_types[limit == 8 ? :float64 : :float][:name] if type.to_s == 'float'
+        # Rails adds precision only to its own datetime types, and a bare DateTime64 is DateTime64(3).
+        return "#{native_database_types[:datetime64][:name]}(#{precision})" if type.to_s == 'datetime64' && precision
 
         super
       end

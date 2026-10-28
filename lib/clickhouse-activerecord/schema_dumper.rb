@@ -60,7 +60,12 @@ module ClickhouseActiverecord
             tbl.print ", to: \"#{view_match[2]}\"" if view_match && view_match[2].presence
           end
 
-          if (id = columns.detect { |c| c.name == 'id' })
+          id = columns.detect { |c| c.name == 'id' }
+          # create_table adds the implicit id after the block's columns, so an id in any other
+          # position is dumped as an ordinary column where it is.
+          inline_id = id && id != columns.last
+
+          if id && !inline_id
             spec = column_spec_for_primary_key(id)
             if spec.present?
               tbl.print ", #{format_colspec(spec)}"
@@ -84,7 +89,7 @@ module ClickhouseActiverecord
           if simple || !view_match
             columns.each do |column|
               raise StandardError, "Unknown type '#{column.sql_type}' for column '#{column.name}'" unless @connection.valid_type?(column.type)
-              next if column.name == pk && column.name == "id"
+              next if column.name == pk && column.name == "id" && !inline_id
               name = column.name =~ (/\./) ? "\"`#{column.name}`\"" : column.name.inspect
               if column.sql_type.match?(/^(Simple)?AggregateFunction/)
                 tbl.print "    t.column #{name}, #{column.sql_type.inspect}"
@@ -175,6 +180,24 @@ module ClickhouseActiverecord
       (column.sql_type =~ /LowCardinality\(/).nil? ? nil : true
     end
 
+    # Rails leaves out datetime precision 6 as its default, but `t.datetime` here creates a plain
+    # DateTime when precision is absent.
+    def schema_precision(column)
+      return column.precision.inspect if column.type == :datetime && column.precision
+
+      super
+    end
+
+    # Loading casts a decimal default through BigDecimal, so `DEFAULT 0` would come back as
+    # `DEFAULT 0.`. The server's expression is written instead.
+    def schema_default(column)
+      if column.type == :decimal && column.default_expression&.match?(/\A-?\d+\z/)
+        return "-> { #{column.default_expression.inspect} }"
+      end
+
+      super
+    end
+
     # @param [ActiveRecord::ConnectionAdapters::Clickhouse::Column] column
     def prepare_column_options(column)
       spec = {}
@@ -186,7 +209,12 @@ module ClickhouseActiverecord
       end
       spec[:low_cardinality] = schema_low_cardinality(column)
       spec[:codec] = column.codec.inspect if column.codec
-      spec.merge(super).compact
+      spec = spec.merge(super)
+      if column.virtual?
+        spec.delete(:default)
+        spec[column.default_kind.to_sym] = column.default_expression.inspect
+      end
+      spec.compact
     end
 
     def index_parts(index)
