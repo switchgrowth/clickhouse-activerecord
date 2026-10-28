@@ -38,10 +38,9 @@ module ClickhouseActiverecord
       establish_master_connection
 
       # A user-defined function belongs to the server, not the database, so another database on the
-      # same server may already have it when this file loads.
-      functions = connection.execute("SELECT create_query FROM system.functions WHERE origin = 'SQLUserDefined' ORDER BY name")['data']
-                            .flatten
-                            .map { |function| function.gsub('\\n', "\n").sub(/\ACREATE FUNCTION/, 'CREATE OR REPLACE FUNCTION') }
+      # same server may already have it when this file loads. show_create_function writes
+      # CREATE OR REPLACE for that reason.
+      functions = connection.functions.map { |name| connection.show_create_function(name).gsub('\\n', "\n") }
 
       ignore_tables = ActiveRecord::SchemaDumper.ignore_tables
       table_defs = connection.execute("SHOW TABLES FROM #{@configuration.database} WHERE name NOT LIKE '.inner_id.%'")['data']
