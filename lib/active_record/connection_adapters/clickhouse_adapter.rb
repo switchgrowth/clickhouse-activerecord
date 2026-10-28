@@ -399,7 +399,8 @@ module ActiveRecord
       # @option [Boolean] single_line
       # @return [String]
       def show_create_table(table, single_line: true)
-        sql = do_system_execute("SHOW CREATE TABLE `#{table}`")['data'].try(:first).try(:first).gsub("#{@config[:database]}.", '')
+        sql = do_system_execute("SHOW CREATE TABLE `#{table}`")['data'].try(:first).try(:first)
+        sql = remove_database_qualifier(sql)
         single_line ? sql.squish : sql
       end
 
@@ -637,6 +638,13 @@ module ActiveRecord
       end
 
       private
+
+      # Removes the database qualifier from the names in a statement. Quoted strings keep it, so a
+      # default or comment that mentions the database name reads the same after a load.
+      def remove_database_qualifier(sql)
+        qualifier = /(?<![\w.`])#{Regexp.escape(@config[:database].to_s)}\./
+        sql.split(/('(?:[^'\\]|\\.)*')/).each_with_index.map { |part, i| i.odd? ? part : part.gsub(qualifier, '') }.join
+      end
 
       def connect
         @connection = @connection_parameters[:connection] || Net::HTTP.start(

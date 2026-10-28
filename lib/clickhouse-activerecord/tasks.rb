@@ -45,7 +45,7 @@ module ClickhouseActiverecord
       # get all tables
       table_defs = connection.execute("SHOW TABLES FROM #{@configuration.database} WHERE name NOT LIKE '.inner_id.%'")['data']
                              .flatten
-                             .map { |name| connection.show_create_table(name, single_line: false).gsub("#{@configuration.database}.", '') }
+                             .map { |name| connection.show_create_table(name, single_line: false) }
 
       # separate views from tables
       views, tables = table_defs.partition { |sql| sql.match(/^CREATE\s+(MATERIALIZED\s+)?VIEW/) }
