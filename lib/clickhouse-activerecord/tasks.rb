@@ -37,14 +37,16 @@ module ClickhouseActiverecord
     def structure_dump(path, *)
       establish_master_connection
 
-      # get all functions
+      # A user-defined function belongs to the server, not the database, so another database on the
+      # same server may already have it when this file loads.
       functions = connection.execute("SELECT create_query FROM system.functions WHERE origin = 'SQLUserDefined' ORDER BY name")['data']
                             .flatten
-                            .map { |function| function.gsub('\\n', "\n") }
+                            .map { |function| function.gsub('\\n', "\n").sub(/\ACREATE FUNCTION/, 'CREATE OR REPLACE FUNCTION') }
 
-      # get all tables
+      ignore_tables = ActiveRecord::SchemaDumper.ignore_tables
       table_defs = connection.execute("SHOW TABLES FROM #{@configuration.database} WHERE name NOT LIKE '.inner_id.%'")['data']
                              .flatten
+                             .reject { |name| ignore_tables.any? { |pattern| pattern === name } }
                              .map { |name| connection.show_create_table(name, single_line: false) }
 
       # separate views from tables
