@@ -650,7 +650,7 @@ module ActiveRecord
         return sql if database.blank?
 
         qualifier = Regexp.escape(database)
-        pattern = /(?<identifier>`(?:[^`\\]|\\.)*`)|(?<function>\bdict(?:Get\w*|Has|IsIn)\(\s*)'#{qualifier}\.(?<name>\w+)'|(?<string>'(?:[^'\\]|\\.)*')|(?<![\w.`])#{qualifier}\./
+        pattern = /(?<identifier>`(?:[^`\\]|\\.)*`)|(?<function>\bdict(?:Get\w*|Has|IsIn)\(\s*)'#{qualifier}\.(?<name>[^'\\]+)'|(?<string>'(?:[^'\\]|\\.)*')|(?<![\w.`])#{qualifier}\./
         sql.gsub(pattern) do
           match = Regexp.last_match
           if match[:identifier] then match[:identifier]

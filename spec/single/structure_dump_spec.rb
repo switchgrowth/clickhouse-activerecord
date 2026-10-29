@@ -107,11 +107,11 @@ RSpec.describe 'Structure dump', :migrations do
     other = "#{database}_structure_spec"
     connection.execute('CREATE TABLE structure_spec (id UInt64, name String) ENGINE = MergeTree ORDER BY id')
     connection.execute(<<~SQL)
-      CREATE DICTIONARY structure_spec_dict (id UInt64, name String) PRIMARY KEY id
+      CREATE DICTIONARY `structure-spec-dict` (id UInt64, name String) PRIMARY KEY id
       SOURCE(CLICKHOUSE(TABLE 'structure_spec')) LIFETIME(0) LAYOUT(FLAT())
     SQL
     connection.execute(<<~SQL)
-      CREATE VIEW structure_spec_view AS SELECT dictGet('#{database}.structure_spec_dict', 'name', id) AS name FROM structure_spec
+      CREATE VIEW structure_spec_view AS SELECT dictGet('#{database}.structure-spec-dict', 'name', id) AS name FROM structure_spec
     SQL
     structure = dump
 
@@ -126,12 +126,12 @@ RSpec.describe 'Structure dump', :migrations do
     view = ActiveRecord::Base.connection.select_value(
       "SELECT create_table_query FROM system.tables WHERE database = '#{other}' AND name = 'structure_spec_view'"
     )
-    expect(view).to include("dictGet('#{other}.structure_spec_dict'")
+    expect(view).to include("dictGet('#{other}.structure-spec-dict'")
   ensure
     ActiveRecord::Base.establish_connection(:default)
     ActiveRecord::Base.connection.execute("DROP DATABASE IF EXISTS #{other}")
     ActiveRecord::Base.connection.execute('DROP VIEW IF EXISTS structure_spec_view')
-    ActiveRecord::Base.connection.execute('DROP DICTIONARY IF EXISTS structure_spec_dict')
+    ActiveRecord::Base.connection.execute('DROP DICTIONARY IF EXISTS `structure-spec-dict`')
   end
 
   it 'loads while the server already has its user-defined functions' do
