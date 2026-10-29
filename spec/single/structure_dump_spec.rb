@@ -78,6 +78,18 @@ RSpec.describe 'Structure dump', :migrations do
     ])
   end
 
+  it 'keeps a backquoted name with a dot, and a qualifier that only ends in the database name' do
+    other = "other_#{database}"
+    connection.execute("CREATE DATABASE #{other}")
+    connection.execute("CREATE TABLE #{other}.structure_spec (id UInt64) ENGINE = MergeTree ORDER BY id")
+    connection.execute("CREATE VIEW structure_spec_view AS SELECT id AS `#{database}.id` FROM #{other}.structure_spec")
+
+    expect(connection.show_create_table('structure_spec_view')).to include("`#{database}.id`", "FROM #{other}.structure_spec")
+  ensure
+    connection.execute('DROP VIEW IF EXISTS structure_spec_view')
+    connection.execute("DROP DATABASE IF EXISTS #{other}")
+  end
+
   it 'keeps the SQL unchanged when the configuration names no database' do
     ActiveRecord::Base.establish_connection(ActiveRecord::Base.connection_db_config.configuration_hash.except(:database))
     ActiveRecord::Base.connection.execute(<<~SQL)
