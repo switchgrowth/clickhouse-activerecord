@@ -96,7 +96,8 @@ RSpec.describe 'Structure dump', :migrations do
       CREATE TABLE default.structure_spec (id UInt64, extension String DEFAULT '.csv') ENGINE = MergeTree ORDER BY id
     SQL
 
-    expect(ActiveRecord::Base.connection.show_create_table('structure_spec')).to include("DEFAULT '.csv'")
+    server_sql = ActiveRecord::Base.connection.execute('SHOW CREATE TABLE structure_spec')['data'].first.first
+    expect(ActiveRecord::Base.connection.show_create_table('structure_spec', single_line: false)).to eq(server_sql)
   ensure
     ActiveRecord::Base.connection.execute('DROP TABLE IF EXISTS default.structure_spec')
     ActiveRecord::Base.establish_connection(:default)
