@@ -55,15 +55,27 @@ RSpec.describe 'Structure dump', :migrations do
     expect(dump).to eq(structure)
   end
 
-  it 'keeps a quoted string that mentions the database' do
+  it 'keeps the strings that mention the database: defaults, Enum labels and comments' do
     connection.execute(<<~SQL)
-      CREATE TABLE structure_spec (id UInt64, source String DEFAULT 'copied from #{database}.example') ENGINE = MergeTree ORDER BY id
+      CREATE TABLE structure_spec (
+        id UInt64,
+        source String DEFAULT '#{database}.example' COMMENT '#{database}.comment',
+        note String DEFAULT 'copied from #{database}.example',
+        kind Enum8('#{database}.web' = 1)
+      ) ENGINE = MergeTree ORDER BY id
     SQL
 
     load_structure(dump)
 
-    default = connection.select_value("SELECT default_expression FROM system.columns WHERE database = '#{database}' AND table = 'structure_spec' AND name = 'source'")
-    expect(default).to eq("'copied from #{database}.example'")
+    columns = connection.execute(<<~SQL)['data']
+      SELECT name, type, default_expression, comment FROM system.columns
+      WHERE database = '#{database}' AND table = 'structure_spec' AND name != 'id' ORDER BY name
+    SQL
+    expect(columns).to eq([
+      ['kind', "Enum8('#{database}.web' = 1)", '', ''],
+      ['note', 'String', "'copied from #{database}.example'", ''],
+      ['source', 'String', "'#{database}.example'", "#{database}.comment"]
+    ])
   end
 
   it 'keeps the SQL unchanged when the configuration names no database' do

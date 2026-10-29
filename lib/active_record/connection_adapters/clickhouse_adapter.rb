@@ -640,17 +640,22 @@ module ActiveRecord
       private
 
       # Removes the database qualifier from the names in a statement, so it loads into a database of
-      # any name. A string that is only a qualified name, as dictGet and joinGet take, is a name too:
-      # ClickHouse qualifies it with the current database again on CREATE. Any other string, and
-      # a backquoted identifier, stays as it is.
+      # any name. The dictionary functions (dictGet and its variants, dictHas, dictIsIn) take the
+      # dictionary name as a string, and ClickHouse qualifies that string with the current database
+      # again on CREATE, so the qualifier comes off there too. Every other string stays as it is:
+      # most are data (a default, an Enum label, a comment), and joinGet and dictionary() resolve an
+      # unqualified name against the database of the session that runs the query, not the one that
+      # created the view. A backquoted identifier also stays as it is.
       def remove_database_qualifier(sql)
-        return sql if @config[:database].blank?
+        return sql if database.blank?
 
-        database = Regexp.escape(@config[:database].to_s)
-        sql.gsub(/(`(?:[^`\\]|\\.)*`)|'#{database}\.(\w+)'|('(?:[^'\\]|\\.)*')|(?<![\w.`])#{database}\./) do
-          if $1 then $1
-          elsif $2 then "'#{$2}'"
-          elsif $3 then $3
+        qualifier = Regexp.escape(database)
+        pattern = /(?<identifier>`(?:[^`\\]|\\.)*`)|(?<function>\bdict(?:Get\w*|Has|IsIn)\(\s*)'#{qualifier}\.(?<name>\w+)'|(?<string>'(?:[^'\\]|\\.)*')|(?<![\w.`])#{qualifier}\./
+        sql.gsub(pattern) do
+          match = Regexp.last_match
+          if match[:identifier] then match[:identifier]
+          elsif match[:function] then "#{match[:function]}'#{match[:name]}'"
+          elsif match[:string] then match[:string]
           else ''
           end
         end
