@@ -111,7 +111,11 @@ RSpec.describe 'Structure dump', :migrations do
       SOURCE(CLICKHOUSE(TABLE 'structure_spec')) LIFETIME(0) LAYOUT(FLAT())
     SQL
     connection.execute(<<~SQL)
-      CREATE VIEW structure_spec_view AS SELECT dictGet('#{database}.structure-spec-dict', 'name', id) AS name FROM structure_spec
+      CREATE VIEW structure_spec_view AS SELECT
+        dictGet('#{database}.structure-spec-dict', 'name', id) AS name,
+        dictHas('#{database}.structure-spec-dict', id) AS known,
+        dictGetOrDefault('#{database}.structure-spec-dict', 'name', id, '#{database}.unknown') AS name_or_default
+      FROM structure_spec
     SQL
     structure = dump
 
@@ -126,7 +130,11 @@ RSpec.describe 'Structure dump', :migrations do
     view = ActiveRecord::Base.connection.select_value(
       "SELECT create_table_query FROM system.tables WHERE database = '#{other}' AND name = 'structure_spec_view'"
     )
-    expect(view).to include("dictGet('#{other}.structure-spec-dict'")
+    expect(view).to include(
+      "dictGet('#{other}.structure-spec-dict'",
+      "dictHas('#{other}.structure-spec-dict'",
+      "dictGetOrDefault('#{other}.structure-spec-dict', 'name', id, '#{database}.unknown')"
+    )
   ensure
     ActiveRecord::Base.establish_connection(:default)
     ActiveRecord::Base.connection.execute("DROP DATABASE IF EXISTS #{other}")
