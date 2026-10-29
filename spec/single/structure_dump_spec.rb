@@ -145,13 +145,16 @@ RSpec.describe 'Structure dump', :migrations do
   it 'loads while the server already has its user-defined functions' do
     connection.execute('CREATE FUNCTION structure_spec_double AS (x) -> x * 2', nil, format: nil)
 
-    expect { load_structure(dump) }.not_to raise_error
+    structure = dump
+
+    expect(structure).to include('CREATE OR REPLACE FUNCTION structure_spec_double')
+    expect { load_structure(structure) }.not_to raise_error
   end
 
   it 'leaves out the tables that the schema dumper ignores' do
+    ignore_tables = ActiveRecord::SchemaDumper.ignore_tables
     connection.execute('CREATE TABLE structure_spec (id UInt64) ENGINE = MergeTree ORDER BY id')
     connection.execute('CREATE TABLE structure_spec_ignored (id UInt64) ENGINE = MergeTree ORDER BY id')
-    ignore_tables = ActiveRecord::SchemaDumper.ignore_tables
     ActiveRecord::SchemaDumper.ignore_tables = [/ignored/]
 
     structure = dump
