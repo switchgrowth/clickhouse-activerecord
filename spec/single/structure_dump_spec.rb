@@ -66,6 +66,18 @@ RSpec.describe 'Structure dump', :migrations do
     expect(default).to eq("'copied from #{database}.example'")
   end
 
+  it 'keeps the SQL unchanged when the configuration names no database' do
+    ActiveRecord::Base.establish_connection(ActiveRecord::Base.connection_db_config.configuration_hash.except(:database))
+    ActiveRecord::Base.connection.execute(<<~SQL)
+      CREATE TABLE default.structure_spec (id UInt64, extension String DEFAULT '.csv') ENGINE = MergeTree ORDER BY id
+    SQL
+
+    expect(ActiveRecord::Base.connection.show_create_table('structure_spec')).to include("DEFAULT '.csv'")
+  ensure
+    ActiveRecord::Base.connection.execute('DROP TABLE IF EXISTS default.structure_spec')
+    ActiveRecord::Base.establish_connection(:default)
+  end
+
   it 'loads into a database with another name, with names qualified for that database' do
     other = "#{database}_structure_spec"
     connection.execute('CREATE TABLE structure_spec (id UInt64, name String) ENGINE = MergeTree ORDER BY id')

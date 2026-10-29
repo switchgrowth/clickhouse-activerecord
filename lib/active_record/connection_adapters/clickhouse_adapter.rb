@@ -644,6 +644,8 @@ module ActiveRecord
       # ClickHouse qualifies it with the current database again on CREATE. Any other string, and
       # a backquoted identifier, stays as it is.
       def remove_database_qualifier(sql)
+        return sql if @config[:database].blank?
+
         database = Regexp.escape(@config[:database].to_s)
         sql.gsub(/(`(?:[^`\\]|\\.)*`)|'#{database}\.(\w+)'|('(?:[^'\\]|\\.)*')|(?<![\w.`])#{database}\./) do
           if $1 then $1
