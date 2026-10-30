@@ -73,7 +73,7 @@ RSpec.describe 'Schema Loading', :migrations do
         end
 
         # Verify the view was created successfully
-        # Note: show_create_table strips database prefixes, so we just verify
+        # Note: show_create_table removes the database qualifier from names, so we just verify
         # that the view exists and the function wasn't broken by incorrect prefixing
         show_create = connection.show_create_table('test_view')
 

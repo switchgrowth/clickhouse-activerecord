@@ -37,15 +37,13 @@ module ClickhouseActiverecord
     def structure_dump(path, *)
       establish_master_connection
 
-      # get all functions
-      functions = connection.execute("SELECT create_query FROM system.functions WHERE origin = 'SQLUserDefined' ORDER BY name")['data']
-                            .flatten
-                            .map { |function| function.gsub('\\n', "\n") }
+      functions = connection.functions.map { |name| connection.show_create_function(name).gsub('\\n', "\n") }
 
-      # get all tables
+      ignore_tables = ActiveRecord::SchemaDumper.ignore_tables
       table_defs = connection.execute("SHOW TABLES FROM #{@configuration.database} WHERE name NOT LIKE '.inner_id.%'")['data']
                              .flatten
-                             .map { |name| connection.show_create_table(name, single_line: false).gsub("#{@configuration.database}.", '') }
+                             .reject { |name| ignore_tables.any? { |pattern| pattern === name } }
+                             .map { |name| connection.show_create_table(name, single_line: false) }
 
       # separate views from tables
       views, tables = table_defs.partition { |sql| sql.match(/^CREATE\s+(MATERIALIZED\s+)?VIEW/) }
