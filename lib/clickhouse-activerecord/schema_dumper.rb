@@ -63,7 +63,7 @@ module ClickhouseActiverecord
           id = columns.detect { |c| c.name == 'id' }
           # create_table adds the implicit id after the block's columns, so an id in any other
           # position is dumped as an ordinary column where it is.
-          inline_id = id && id != columns.last
+          inline_id = id && columns.last.name != 'id'
 
           if id && !inline_id
             spec = column_spec_for_primary_key(id)
@@ -188,10 +188,10 @@ module ClickhouseActiverecord
       super
     end
 
-    # Loading casts a decimal default through BigDecimal, so `DEFAULT 0` would come back as
-    # `DEFAULT 0.`. The server's expression is written instead.
+    # Loading casts a decimal or float default to a fractional number, so `DEFAULT 0` would come
+    # back as `DEFAULT 0.`. The server's expression is written instead.
     def schema_default(column)
-      if column.type == :decimal && column.default_expression&.match?(/\A-?\d+\z/)
+      if %i[decimal float].include?(column.type) && column.default_expression&.match?(/\A-?\d+\z/)
         return "-> { #{column.default_expression.inspect} }"
       end
 
@@ -209,12 +209,11 @@ module ClickhouseActiverecord
       end
       spec[:low_cardinality] = schema_low_cardinality(column)
       spec[:codec] = column.codec.inspect if column.codec
-      spec = spec.merge(super)
       if column.virtual?
-        spec.delete(:default)
-        spec[column.default_kind.to_sym] = column.default_expression.inspect
+        spec[:as] = column.default_expression.inspect
+        spec[:stored] = 'true' if column.virtual_stored?
       end
-      spec.compact
+      spec.merge(super).compact
     end
 
     def index_parts(index)

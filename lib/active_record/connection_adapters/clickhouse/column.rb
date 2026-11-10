@@ -22,6 +22,25 @@ module ActiveRecord
           default_kind.materialized? || default_kind.alias?
         end
 
+        def virtual_stored?
+          default_kind.materialized?
+        end
+
+        # The schema cache deduplicates columns by equality, so a column that differs only in these
+        # attributes, such as MATERIALIZED and ALIAS columns with one expression, must not be equal.
+        def ==(other)
+          other.is_a?(Clickhouse::Column) &&
+            super &&
+            codec == other.codec &&
+            default_kind == other.default_kind &&
+            default_expression == other.default_expression
+        end
+        alias :eql? :==
+
+        def hash
+          super ^ codec.hash ^ default_kind.hash ^ default_expression.hash
+        end
+
         # Whether the column holds a ClickHouse `Array(...)` type.
         #
         # ActiveRecord core never calls this, but tooling such as annotaterb

@@ -296,7 +296,7 @@ module ActiveRecord
         def new_column_from_field(table_name, field, _definitions)
           type_metadata = fetch_type_metadata(field.sql_type)
           default_value = extract_value_from_default(field.default_expression, field.default_type)
-          default_function = extract_default_function(field.default_expression)
+          default_function = extract_default_function(field.default_expression, field.default_type)
           cast_type = lookup_cast_type(field.sql_type)
           default_value = cast_type.cast(default_value)
 
@@ -323,8 +323,8 @@ module ActiveRecord
           default_expression
         end
 
-        def extract_default_function(default) # :nodoc:
-          default if has_default_function?(default)
+        def extract_default_function(default_expression, default_type) # :nodoc:
+          default_expression if default_type == 'DEFAULT' && has_default_function?(default_expression)
         end
 
         def has_default_function?(default) # :nodoc:
