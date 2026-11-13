@@ -234,7 +234,7 @@ RSpec.describe 'Connection hardening' do
         it 'does not retry, so the server cannot apply the insert twice' do
           allow(http_connection).to receive(:post).and_raise(error)
 
-          expect { adapter.exec_insert_all(insert, 'Bulk Insert') }.to raise_error(StandardError)
+          expect { adapter.exec_insert_all(insert, 'Bulk Insert') }.to raise_error(error)
           expect(http_connection).to have_received(:post).once
         end
       end

@@ -68,7 +68,7 @@ module ClickhouseActiverecord
       rows = table_rows.reject { |name, *| ignore_tables.any? { |pattern| pattern === name } }
       names = Set.new(rows.map(&:first))
 
-      # `show_create_table` removes the database qualifier from names and keeps it in strings.
+      # `show_create_table` already removes the database qualifier.
       definitions = rows.map do |name, *|
         sql = @connection.show_create_table(name, single_line: false)
                          .gsub("/#{@database}/", '/{database}/')
