@@ -64,9 +64,10 @@ module ActiveRecord
               result = nil
               with_http_session do
                 req = Net::HTTP::Post.new("/?#{settings_params(settings)}", build_request_headers)
-                @connection.request(req, statement.formatted_sql) do |response|
-                  result = statement.streaming_response(response)
+                response = @connection.request(req, statement.formatted_sql) do |streamed|
+                  result = statement.streaming_response(streamed)
                 end
+                follow_server_keep_alive(response)
               end
               result
             end
@@ -353,10 +354,25 @@ module ActiveRecord
         # @return [Net::HTTPResponse]
         def request(statement, settings: {}, except_params: [])
           with_http_session do
-            @connection.post("/?#{settings_params(settings, except: except_params)}",
-                             statement.formatted_sql,
-                             build_request_headers(include_database: !except_params.include?(:database)))
+            response = @connection.post("/?#{settings_params(settings, except: except_params)}",
+                                        statement.formatted_sql,
+                                        build_request_headers(include_database: !except_params.include?(:database)))
+            follow_server_keep_alive(response)
+            response
           end
+        end
+
+        # ClickHouse closes an idle connection after its own `keep_alive_timeout`, and gives that
+        # timeout in each response. Net::HTTP reuses a socket until its own timeout, and a request
+        # on a socket the server is closing fails as a dropped connection, so the client stops
+        # reusing it one second before the server closes it. A configured `keep_alive_timeout`
+        # can only shorten that.
+        def follow_server_keep_alive(response)
+          server_timeout = response['Keep-Alive'].to_s[/timeout=(\d+)/, 1]
+          return unless server_timeout
+
+          limit = [@connection_parameters[:keep_alive_timeout], server_timeout.to_i - 1].compact.min
+          @connection.keep_alive_timeout = [limit, 0].max
         end
 
         # Every request passes through here, so this is where `translate_exception` maps a network
