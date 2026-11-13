@@ -85,9 +85,9 @@ RSpec.describe 'Structure dump', :migrations do
     other = "other_#{database}"
     connection.execute("CREATE DATABASE #{other}")
     connection.execute("CREATE TABLE #{other}.structure_spec (id UInt64) ENGINE = MergeTree ORDER BY id")
-    connection.execute("CREATE VIEW structure_spec_view AS SELECT id AS `#{database}.id` FROM #{other}.structure_spec")
+    connection.execute("CREATE VIEW structure_spec_view AS SELECT id AS `x #{database}.id` FROM #{other}.structure_spec")
 
-    expect(connection.show_create_table('structure_spec_view')).to include("`#{database}.id`", "FROM #{other}.structure_spec")
+    expect(connection.show_create_table('structure_spec_view')).to include("`x #{database}.id`", "FROM #{other}.structure_spec")
   ensure
     connection.execute('DROP VIEW IF EXISTS structure_spec_view')
     connection.execute("DROP DATABASE IF EXISTS #{other}")
@@ -286,5 +286,14 @@ RSpec.describe ClickhouseActiverecord::StructureDumper, :migrations do
     names = Timeout.timeout(10) { dumped_names(described_class.new(cyclic, database)) }
 
     expect(names).to contain_exactly('a_view', 'b_view')
+  end
+
+  it 'skips a function dropped after it was listed' do
+    dropped = instance_double(ActiveRecord::ConnectionAdapters::ClickhouseAdapter, functions: ['gone_fun'])
+    allow(dropped).to receive(:quote) { |value| "'#{value}'" }
+    allow(dropped).to receive(:show_create_function).with('gone_fun').and_return(nil)
+    allow(dropped).to receive(:execute).and_return({ 'data' => [] })
+
+    expect(described_class.new(dropped, database).statements).to eq([])
   end
 end
