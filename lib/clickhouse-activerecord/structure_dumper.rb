@@ -115,6 +115,9 @@ module ClickhouseActiverecord
         WHERE database = #{@connection.quote(@database)} AND name NOT LIKE '.inner_id.%'
         ORDER BY name
       SQL
+    rescue ActiveRecord::QueryAborted
+      # A timeout or a dropped connection says nothing about the server's version.
+      raise
     rescue ActiveRecord::StatementInvalid
       # `loading_dependencies_*` were added in ClickHouse 22.4.
       @connection.execute(<<~SQL)['data'].map { |name, *dependencies| [name, [], [], *dependencies] }

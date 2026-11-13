@@ -2,7 +2,6 @@
 
 require 'base64'
 require 'net/http'
-require 'openssl'
 require 'clickhouse-activerecord/version'
 
 module ActiveRecord
@@ -13,15 +12,6 @@ module ActiveRecord
         HTTP_AUTH_BASIC = :basic
         HTTP_AUTH_X_HEADERS = :x_clickhouse_headers
         HTTP_AUTH_TYPES = [HTTP_AUTH_QUERY_PARAMS, HTTP_AUTH_BASIC, HTTP_AUTH_X_HEADERS].freeze
-
-        # Net::HTTP raises these only while it opens the connection, before it writes the request.
-        # The adapter raises ActiveRecord::ConnectionNotEstablished for them.
-        CONNECT_ERRORS = [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ENETUNREACH].freeze
-
-        # An open connection drops, so the server may have received the statement. ETIMEDOUT and
-        # SSLError can also occur while the connection opens, but the adapter can't tell, so it
-        # assumes the worse case. The adapter raises ActiveRecord::ConnectionFailed for them.
-        CONNECTION_LOST_ERRORS = [EOFError, IOError, Errno::ECONNRESET, Errno::EPIPE, Errno::ETIMEDOUT, OpenSSL::SSL::SSLError].freeze
 
         def with_settings(**settings)
           @block_settings ||= {}
@@ -91,9 +81,10 @@ module ActiveRecord
 
         # Rails 8.1's `query` passes `materialize_transactions:`. ClickHouse has no transaction to
         # materialize, so this method ignores the keyword.
-        # A read runs once more on a new connection when the connection drops. Rails sets
-        # `allow_retry` only for queries it builds from Arel alone, so a read in SQL text also
-        # qualifies by its first keyword. A write never runs twice.
+        #
+        # A read runs once more on a new session when the connection drops. Rails 7.2 and later
+        # pass `allow_retry` for a query built from Arel alone, and Rails 7.1 never does, so any
+        # statement that `write_query?` reads as a read also qualifies. A write never runs twice.
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false, allow_retry: false, materialize_transactions: true)
           retried = false
           begin
@@ -112,7 +103,6 @@ module ActiveRecord
 
             retried = true
             logger&.warn("[clickhouse-activerecord] retrying read query after connection failure (#{e.message})")
-            reconnect
             retry
           end
         end

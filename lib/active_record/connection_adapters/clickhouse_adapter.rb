@@ -140,6 +140,9 @@ module ActiveRecord
       ) # :nodoc:
       private_constant :READ_QUERY
 
+      CONNECT_ERRORS = [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED, Errno::EADDRNOTAVAIL].freeze
+      private_constant :CONNECT_ERRORS
+
       include Clickhouse::SchemaStatements
 
       # our `execute` shadows the wrapper `QueryCache` installs on `AbstractAdapter`
@@ -704,18 +707,27 @@ module ActiveRecord
         @connection
       end
 
+      # Rails' `verify!` and `reconnect!` call this to prove the server is reachable, so unlike
+      # `connect` it opens the session.
       def reconnect
+        @connection.finish if @connection&.started?
         connect
+        with_http_session {}
       end
 
+      # Net::HTTP raises CONNECT_ERRORS only while it opens the connection, before it writes the
+      # request, so the server never received the statement. Net::HTTP turns a timeout while it
+      # opens into Net::OpenTimeout, so an ETIMEDOUT comes from an open connection. Any other
+      # system call error, an unreachable host included, can also arrive on an open connection, so
+      # the server may have received the statement.
       def translate_exception(exception, message:, sql:, binds:)
         case exception
         when *CONNECT_ERRORS
           ActiveRecord::ConnectionNotEstablished.new(message, connection_pool: @pool)
-        when *CONNECTION_LOST_ERRORS
-          ActiveRecord::ConnectionFailed.new(message, sql: sql, binds: binds, connection_pool: @pool)
         when Net::ReadTimeout, Net::WriteTimeout
           ActiveRecord::AdapterTimeout.new(message, sql: sql, binds: binds, connection_pool: @pool)
+        when IOError, SystemCallError, OpenSSL::SSL::SSLError
+          ActiveRecord::ConnectionFailed.new(message, sql: sql, binds: binds, connection_pool: @pool)
         else
           super
         end
