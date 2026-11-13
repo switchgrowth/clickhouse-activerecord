@@ -701,9 +701,8 @@ module ActiveRecord
         @connection.read_timeout = @connection_parameters[:read_timeout] if @connection_parameters[:read_timeout]
         @connection.write_timeout = @connection_parameters[:write_timeout] if @connection_parameters[:write_timeout]
 
-        # Until a response gives the server's timeout, Net::HTTP's own default of 2 applies (see
-        # `follow_server_keep_alive`).
-        @connection.keep_alive_timeout = @connection_parameters[:keep_alive_timeout] if @connection_parameters[:keep_alive_timeout]
+        limit = keep_alive_limit
+        @connection.keep_alive_timeout = limit if limit
 
         @connection
       end

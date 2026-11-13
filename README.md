@@ -125,9 +125,10 @@ clickhouse:
 - **The client stops reusing an idle connection one second before the server closes it.**
   ClickHouse gives its `keep_alive_timeout` in each response's `Keep-Alive` header, and a request
   on a socket the server is closing fails as a dropped connection. A configured
-  `keep_alive_timeout` can only shorten this. Until the first response, or when a proxy removes
-  the header, `Net::HTTP`'s default of 2 seconds applies. Behind a proxy or load balancer, set
-  `keep_alive_timeout` below its idle timeout.
+  `keep_alive_timeout` can only shorten this. When a response has no `Keep-Alive` header, as
+  behind a proxy that removes it, the configured `keep_alive_timeout` applies, or `Net::HTTP`'s
+  default of 2 seconds when none is set. Behind a proxy or load balancer, set
+  `keep_alive_timeout` below its idle timeout. A server timeout of 1 second turns reuse off.
 - **The connection opens on the first request**, not when the adapter is created, so a failure
   to open it raises the same error class, and gets the same retry, as on any later request.
   `verify!` and `reconnect!` open it at once, so they still fail when the server is unreachable.

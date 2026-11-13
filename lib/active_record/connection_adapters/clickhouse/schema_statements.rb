@@ -362,17 +362,19 @@ module ActiveRecord
           end
         end
 
-        # ClickHouse closes an idle connection after its own `keep_alive_timeout`, and gives that
-        # timeout in each response. Net::HTTP reuses a socket until its own timeout, and a request
-        # on a socket the server is closing fails as a dropped connection, so the client stops
-        # reusing it one second before the server closes it. A configured `keep_alive_timeout`
-        # can only shorten that.
         def follow_server_keep_alive(response)
           server_timeout = response['Keep-Alive'].to_s[/timeout=(\d+)/, 1]
-          return unless server_timeout
+          @connection.keep_alive_timeout = keep_alive_limit(server_timeout.to_i) if server_timeout
+        end
 
-          limit = [@connection_parameters[:keep_alive_timeout], server_timeout.to_i - 1].compact.min
-          @connection.keep_alive_timeout = [limit, 0].max
+        # ClickHouse closes an idle connection after its own `keep_alive_timeout`, and gives that
+        # timeout in each response's `Keep-Alive` header. Net::HTTP reuses a socket until its own
+        # timeout, and a request on a socket the server is closing fails as a dropped connection,
+        # so the client stops reusing it one second before the server closes it. A configured
+        # `keep_alive_timeout` is a ceiling, and it alone applies when a response has no header,
+        # as behind a proxy that removes it. With neither, Net::HTTP's default of 2 applies (nil).
+        def keep_alive_limit(server_timeout = nil)
+          [@connection_parameters[:keep_alive_timeout], server_timeout && server_timeout - 1].compact.min
         end
 
         # Every request passes through here, so this is where `translate_exception` maps a network

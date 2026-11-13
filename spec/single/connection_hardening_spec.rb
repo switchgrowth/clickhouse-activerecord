@@ -106,41 +106,77 @@ RSpec.describe 'Connection hardening' do
   ]
 
   describe 'keep-alive timeout' do
-    include_context 'with a stubbed client'
+    subject(:adapter) { ActiveRecord::Base.clickhouse_connection(config) }
 
-    def response_with(keep_alive)
-      instance_double(Net::HTTPResponse, code: '200', body: success_body, '[]': nil).tap do |response|
+    let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db' } }
+    let(:client) { Net::HTTP.new('localhost', 8123) }
+
+    before do
+      real_client = client
+      allow(Net::HTTP).to receive(:new).and_return(real_client)
+      allow(real_client).to receive(:started?).and_return(true)
+    end
+
+    def response_with(keep_alive, code: '200', body: success_body)
+      instance_double(Net::HTTPResponse, code: code, body: body, '[]': nil).tap do |response|
         allow(response).to receive(:[]).with('Keep-Alive').and_return(keep_alive)
       end
     end
 
-    it "stops reusing the socket one second before the server's timeout" do
-      allow(http_connection).to receive(:post).and_return(response_with('timeout=3, max=9999'))
-
-      adapter.exec_query('SELECT 1')
-
-      expect(http_connection).to have_received(:keep_alive_timeout=).with(2)
+    def respond_with(*responses)
+      allow(client).to receive(:post).and_return(*responses)
     end
 
-    it 'keeps its timeout when the response has no Keep-Alive header, as behind a proxy that removes it' do
-      allow(http_connection).to receive(:post).and_return(response_with(nil))
+    it "stops reusing the socket one second before the server's timeout" do
+      respond_with(response_with('timeout=6, max=9999'))
 
       adapter.exec_query('SELECT 1')
 
-      expect(http_connection).not_to have_received(:keep_alive_timeout=)
+      expect(client.keep_alive_timeout).to eq(5)
+    end
+
+    it 'follows the header on an error response, which can leave the socket open' do
+      respond_with(response_with('timeout=6, max=9999', code: '400', body: 'Code: 62. DB::Exception: Syntax error (SYNTAX_ERROR)'))
+
+      expect { adapter.exec_query('SELEC 1') }.to raise_error(ActiveRecord::StatementInvalid)
+      expect(client.keep_alive_timeout).to eq(5)
     end
 
     it 'follows the header on a streamed query too' do
-      streaming_response = response_with('timeout=3, max=9999')
+      streaming_response = response_with('timeout=6, max=9999')
       allow(streaming_response).to receive(:read_body).and_yield("id\n1\n")
-      allow(http_connection).to receive(:request) do |_request, _sql, &callback|
+      allow(client).to receive(:request) do |_request, _sql, &callback|
         callback.call(streaming_response)
         streaming_response
       end
 
       adapter.execute_to_file('SELECT 1').close!
 
-      expect(http_connection).to have_received(:keep_alive_timeout=).with(2)
+      expect(client.keep_alive_timeout).to eq(5)
+    end
+
+    it 'keeps its timeout when a later response has no Keep-Alive header, as behind a proxy that removes it' do
+      respond_with(response_with('timeout=6, max=9999'), response_with(nil))
+
+      2.times { adapter.exec_query('SELECT 1') }
+
+      expect(client.keep_alive_timeout).to eq(5)
+    end
+
+    it 'ignores a Keep-Alive header without a timeout' do
+      respond_with(response_with('timeout=6, max=9999'), response_with('max=9999'))
+
+      2.times { adapter.exec_query('SELECT 1') }
+
+      expect(client.keep_alive_timeout).to eq(5)
+    end
+
+    it 'turns reuse off when the server keeps an idle connection for 1 second' do
+      respond_with(response_with('timeout=1, max=9999'))
+
+      adapter.exec_query('SELECT 1')
+
+      expect(client.keep_alive_timeout).to eq(0)
     end
 
     context 'with keep_alive_timeout configured' do
@@ -150,24 +186,35 @@ RSpec.describe 'Connection hardening' do
         let(:configured) { 300 }
 
         it "lowers it to one second before the server's timeout" do
-          allow(http_connection).to receive(:post).and_return(response_with('timeout=3, max=9999'))
+          respond_with(response_with('timeout=6, max=9999'))
 
           adapter.exec_query('SELECT 1')
 
-          expect(http_connection).to have_received(:keep_alive_timeout=).with(300).ordered
-          expect(http_connection).to have_received(:keep_alive_timeout=).with(2).ordered
+          expect(client.keep_alive_timeout).to eq(5)
         end
       end
 
       context 'below the server timeout' do
-        let(:configured) { 1 }
+        let(:configured) { 3 }
 
         it 'keeps the configured value' do
-          allow(http_connection).to receive(:post).and_return(response_with('timeout=3, max=9999'))
+          respond_with(response_with('timeout=6, max=9999'))
 
           adapter.exec_query('SELECT 1')
 
-          expect(http_connection).to have_received(:keep_alive_timeout=).with(1).twice
+          expect(client.keep_alive_timeout).to eq(3)
+        end
+      end
+
+      context 'when no response has a Keep-Alive header' do
+        let(:configured) { 30 }
+
+        it 'uses the configured value' do
+          respond_with(response_with(nil))
+
+          adapter.exec_query('SELECT 1')
+
+          expect(client.keep_alive_timeout).to eq(30)
         end
       end
     end
