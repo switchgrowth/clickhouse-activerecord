@@ -120,32 +120,37 @@ clickhouse:
   take. It's optional and unset by default (`Net::HTTP`'s own default applies), unlike
   `read_timeout`/`write_timeout` which only apply once a connection exists - a network path that
   never completes the TCP handshake (a dead route, a security group silently dropping packets)
-  previously had no bound here at all. It bounds each attempt to open. A read that retries below
-  can open three times (the request, the reconnect and the retry), so it can wait up to three
-  times as long.
-- **Read queries (`SELECT`) are retried once** on a fresh connection when the failure happens
-  before the server responds at all (`Net::OpenTimeout`, `EOFError`, `ECONNRESET`, `IOError`) -
-  the kind of failure a stale pooled connection produces. Writes are not retried on these, and
-  `Net::ReadTimeout` (the server received the query and hasn't answered yet) is deliberately
-  **not** retried on any query - re-sending a query that's already loading the server doesn't
-  help. If the retry also fails, `ActiveRecord::ConnectionFailed` is raised.
-- **`retry_on_connect_error: true`** retries every statement, a write included, once when the
-  connection fails to open (`Net::OpenTimeout`, `SocketError`, `ECONNREFUSED`). `Net::HTTP`
-  raises these before it writes the request, so the server never received it and a write is
-  safe to send again. If the connection fails to open again,
-  `ActiveRecord::ConnectionNotEstablished` is raised. It's off by default. When it's on, the read
-  retry above still covers a connection that drops, and a read reaches the server at most twice.
-  It doesn't cover the first connection, which opens when the adapter is created.
-- **Timeouts and cancellations now raise distinct, Rails-standard error classes** instead of a
-  generic `ActiveRecord::ActiveRecordError`, so callers can `rescue` them the same way they
-  would for any other adapter:
+  previously had no bound here at all. It bounds each attempt to open. Each retry below opens
+  the connection again, so with `retry_on_connect_error` a read can open it up to four times.
+- **The connection opens on the first request**, not when the adapter is created, so a failure
+  to open it raises the same error class, and gets the same retry, as on any later request.
+  `verify!` and `reconnect!` open it at once, so they still fail when the server is unreachable.
+- **Every network and server failure raises a Rails error class**, as Rails' own adapters do,
+  with the original error as its `cause`, so callers can `rescue` them the same way they would
+  for any other adapter:
+  - `ActiveRecord::ConnectionNotEstablished` - the connection failed to open (`Net::OpenTimeout`,
+    `SocketError`, `ECONNREFUSED`, `EADDRNOTAVAIL`). The server never received the statement.
+  - `ActiveRecord::ConnectionFailed` - an open connection dropped (`EOFError`, `ECONNRESET`,
+    `EPIPE`, any other system call error, an SSL error). The server may have run the statement.
+    An unreachable host is here too, because the system can also report it on an open
+    connection.
+  - `ActiveRecord::AdapterTimeout` - the client gave up waiting (`Net::ReadTimeout`,
+    `Net::WriteTimeout`); the query may still be running server-side.
   - `ActiveRecord::StatementTimeout` - the server killed the query server-side, via
     `max_execution_time` or `cancel_http_readonly_queries_on_client_close`.
-  - `ActiveRecord::AdapterTimeout` - the client gave up waiting for a response
-    (`Net::ReadTimeout`); the query may still be running server-side.
-  - `ActiveRecord::ConnectionFailed` - the read retry above failed again.
-  - `ActiveRecord::ConnectionNotEstablished` - with `retry_on_connect_error`, the connection failed
-    to open twice.
+  - `ActiveRecord::StatementInvalid` - any other server error, such as a syntax error.
+    `ConnectionFailed`, `AdapterTimeout` and `StatementTimeout` are also `StatementInvalid`.
+- **Reads are retried once** on a new connection when the connection fails to open or drops
+  (`ActiveRecord::ConnectionNotEstablished` or `ActiveRecord::ConnectionFailed`) - the kind of
+  failure a stale pooled connection produces. A
+  statement is a read when Rails passes `allow_retry: true` (Rails 7.2 and later, for a query it
+  builds from Arel alone) or when it starts with `SELECT`, `WITH`, `SHOW`, `DESC`, `DESCRIBE`,
+  `EXISTS` or `EXPLAIN`, after any comments or parentheses. Writes are never sent again, and a timeout
+  is not retried on any statement - sending a query that's already loading the server again
+  doesn't help.
+- **`retry_on_connect_error: true`** retries every statement, a write included, once when the
+  connection fails to open. `Net::HTTP` raises these errors before it writes the request, so the
+  server never received it and a write is safe to send again. It's off by default.
 
 ## Usage in Rails
 

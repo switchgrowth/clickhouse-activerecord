@@ -5,21 +5,11 @@ RSpec.describe 'URL-based configuration' do
   let(:response) { instance_double(Net::HTTPResponse, code: '200', body: '') }
 
   before do
-    allow(Net::HTTP).to receive(:start).and_return(http_connection)
+    allow(Net::HTTP).to receive(:new).and_return(http_connection)
+    allow(http_connection).to receive_messages(:use_ssl= => nil, :verify_mode= => nil, :open_timeout= => nil)
     allow(http_connection).to receive(:keep_alive_timeout=)
     allow(http_connection).to receive(:started?).and_return(true)
     allow(http_connection).to receive(:post).and_return(response)
-  end
-
-  def net_http_start_args
-    args = nil
-    allow(Net::HTTP).to receive(:start) do |*a, **kw, &block|
-      args = { args: a, kwargs: kw }
-      block.call(http_connection) if block
-      http_connection
-    end
-    ActiveRecord::Base.clickhouse_connection(config)
-    args
   end
 
   context 'basic URL' do
@@ -125,7 +115,9 @@ RSpec.describe 'URL-based configuration' do
     end
 
     it 'verifies the TLS certificate when insecure=false' do
-      expect(net_http_start_args[:kwargs][:verify_mode]).to eq(OpenSSL::SSL::VERIFY_PEER)
+      adapter
+
+      expect(http_connection).to have_received(:verify_mode=).with(OpenSSL::SSL::VERIFY_PEER)
     end
 
     it 'does not use the default replicated MergeTree parameters when that setting is false' do

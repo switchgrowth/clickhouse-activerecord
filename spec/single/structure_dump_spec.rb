@@ -288,6 +288,15 @@ RSpec.describe ClickhouseActiverecord::StructureDumper, :migrations do
     expect(names).to contain_exactly('a_view', 'b_view')
   end
 
+  it 'raises a dropped connection instead of reading it as an old server' do
+    dropped = instance_double(ActiveRecord::ConnectionAdapters::ClickhouseAdapter, functions: [])
+    allow(dropped).to receive(:quote) { |value| "'#{value}'" }
+    allow(dropped).to receive(:execute).and_raise(ActiveRecord::ConnectionFailed)
+
+    expect { described_class.new(dropped, database).statements }.to raise_error(ActiveRecord::ConnectionFailed)
+    expect(dropped).to have_received(:execute).once
+  end
+
   it 'skips a function dropped after it was listed' do
     dropped = instance_double(ActiveRecord::ConnectionAdapters::ClickhouseAdapter, functions: ['gone_fun'])
     allow(dropped).to receive(:quote) { |value| "'#{value}'" }

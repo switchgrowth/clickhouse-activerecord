@@ -13,16 +13,6 @@ module ActiveRecord
         HTTP_AUTH_X_HEADERS = :x_clickhouse_headers
         HTTP_AUTH_TYPES = [HTTP_AUTH_QUERY_PARAMS, HTTP_AUTH_BASIC, HTTP_AUTH_X_HEADERS].freeze
 
-        # Connection-level failures worth a single retry of a read on a fresh connection. With
-        # `retry_on_connect_error`, `with_http_session` retries Net::OpenTimeout first, so a read sees
-        # it here only when that setting is off.
-        RETRYABLE_CONNECTION_ERRORS = [Net::OpenTimeout, EOFError, Errno::ECONNRESET, IOError].freeze
-
-        # The connection fails to open, before Net::HTTP writes the request. Nothing reached the
-        # server, so with `retry_on_connect_error` every statement, a write included, retries once
-        # on these.
-        CONNECT_ERRORS = [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED].freeze
-
         def with_settings(**settings)
           @block_settings ||= {}
           prev_settings = @block_settings
@@ -91,8 +81,13 @@ module ActiveRecord
 
         # Rails 8.1's `query` passes `materialize_transactions:`. ClickHouse has no transaction to
         # materialize, so this method ignores the keyword.
+        #
+        # A read runs once more on a new session when the connection fails to open or drops, the
+        # errors Rails' `retryable_connection_error?` accepts. Rails 7.2 and later pass
+        # `allow_retry` for a query built from Arel alone, and Rails 7.1 never does, so any
+        # statement that `write_query?` reads as a read also qualifies. A write never runs twice.
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false, allow_retry: false, materialize_transactions: true)
-          connection_retries = 0
+          retried = false
           begin
             # `select_all` reaches here on each cache miss, so this must not clear the cache.
             result = execute_statement(sql, name)
@@ -104,23 +99,12 @@ module ActiveRecord
               types[m['name']] = types[i] = type_map.lookup(m['type'])
             end
             ActiveRecord::Result.new(columns, result['data'], types)
-          rescue ActiveRecord::ActiveRecordError => e
-            raise e
-          rescue Net::ReadTimeout => e
-            raise ActiveRecord::AdapterTimeout, "Response: #{e.message}"
-          rescue *RETRYABLE_CONNECTION_ERRORS => e
-            raise ActiveRecord::ConnectionFailed, "Response: #{e.message}" if connection_retries.positive?
+          rescue ActiveRecord::ConnectionFailed, ActiveRecord::ConnectionNotEstablished => e
+            raise if retried || (!allow_retry && write_query?(sql))
 
-            connection_retries += 1
-            logger&.warn("[clickhouse-activerecord] retrying read query after connection failure (#{e.class}: #{e.message})")
-            begin
-              reconnect
-            rescue StandardError
-              nil
-            end
+            retried = true
+            logger&.warn("[clickhouse-activerecord] retrying read query after connection failure (#{e.message})")
             retry
-          rescue StandardError => e
-            raise ActiveRecord::ActiveRecordError, "Response: #{e.message}"
           end
         end
 
@@ -375,29 +359,31 @@ module ActiveRecord
           end
         end
 
-        # The connection can fail to open in `start` or, when Net::HTTP reopens a stale keep-alive
-        # socket, inside the yielded request. Both happen before Net::HTTP writes the request, so with
-        # `retry_on_connect_error` the whole block runs again on a new session.
+        # Every request passes through here, so this is where `translate_exception` maps a network
+        # error to its ActiveRecord class. The connection can fail to open in `start` or, when
+        # Net::HTTP reopens a stale keep-alive socket, inside the yielded request. Both happen before
+        # Net::HTTP writes the request, so with `retry_on_connect_error` the whole block runs again on
+        # a new session.
         #
-        # Any other Exception, an interrupt included, also finishes the session: the reply left unread
-        # on the keep-alive socket would otherwise answer the next request.
+        # Any Exception, an interrupt included, finishes the session: the reply left unread on the
+        # keep-alive socket would otherwise answer the next request.
         def with_http_session
           connect_retries = 0
           @lock.synchronize do
             begin
               @connection.start unless @connection.started?
               yield
-            rescue *CONNECT_ERRORS => e
+            rescue Exception => e
               @connection.finish if @connection.started?
-              raise unless @retry_on_connect_error
-              raise ActiveRecord::ConnectionNotEstablished, "Response: #{e.message}" if connect_retries.positive?
+              raise unless e.is_a?(StandardError)
 
-              connect_retries += 1
-              logger&.warn("[clickhouse-activerecord] retrying statement after the connection failed to open (#{e.class}: #{e.message})")
-              retry
-            rescue Exception
-              @connection.finish if @connection.started?
-              raise
+              error = translate_exception_class(e, nil, nil)
+              if error.is_a?(ActiveRecord::ConnectionNotEstablished) && @retry_on_connect_error && connect_retries.zero?
+                connect_retries += 1
+                logger&.warn("[clickhouse-activerecord] retrying statement after the connection failed to open (#{error.message})")
+                retry
+              end
+              raise error
             end
           end
         end
