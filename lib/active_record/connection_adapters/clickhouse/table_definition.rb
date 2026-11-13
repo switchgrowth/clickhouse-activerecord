@@ -69,16 +69,6 @@ module ActiveRecord
           args.each { |name| column(name, kind, **options.except(:limit)) }
         end
 
-        def datetime(*args, **options)
-          kind = :datetime
-
-          if options[:precision]
-            kind = :datetime64
-          end
-
-          args.each { |name| column(name, kind, **options) }
-        end
-
         def uuid(*args, **options)
           args.each { |name| column(name, :uuid, **options) }
         end
@@ -108,7 +98,7 @@ module ActiveRecord
         private
 
         def valid_column_definition_options
-          super + [:array, :low_cardinality, :fixed_string, :value, :type, :map, :codec, :unsigned]
+          super + [:array, :low_cardinality, :fixed_string, :value, :type, :map, :codec, :unsigned, :as, :stored]
         end
       end
 

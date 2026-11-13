@@ -9,16 +9,36 @@ module ActiveRecord
         end
 
       class Column < ActiveRecord::ConnectionAdapters::Column
-        attr_reader :codec, :default_kind
+        attr_reader :codec, :default_kind, :default_expression
 
-        def initialize(*, codec: nil, default_kind: nil, **)
+        def initialize(*, codec: nil, default_kind: nil, default_expression: nil, **)
           super
           @codec = codec
           @default_kind = ActiveSupport::StringInquirer.new(default_kind.to_s.downcase.presence || 'none')
+          @default_expression = default_expression.presence
         end
 
         def virtual?
           default_kind.materialized? || default_kind.alias?
+        end
+
+        def virtual_stored?
+          default_kind.materialized?
+        end
+
+        # The schema cache deduplicates columns by equality, so a column that differs only in these
+        # attributes, such as MATERIALIZED and ALIAS columns with one expression, must not be equal.
+        def ==(other)
+          other.is_a?(Clickhouse::Column) &&
+            super &&
+            codec == other.codec &&
+            default_kind == other.default_kind &&
+            default_expression == other.default_expression
+        end
+        alias :eql? :==
+
+        def hash
+          super ^ codec.hash ^ default_kind.hash ^ default_expression.hash
         end
 
         # Whether the column holds a ClickHouse `Array(...)` type.

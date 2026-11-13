@@ -39,16 +39,22 @@ module ActiveRecord
           if options[:map] == true
             sql.gsub!(/\s+(.*)/, ' Map(String, \1)')
           end
-          if options[:codec]
-            sql.gsub!(/\s+(.*)/, " \\1 CODEC(#{options[:codec]})")
-          end
           sql.gsub!(/(\sString)\(\d+\)/, '\1')
 
-          if ::ActiveRecord::version >= Gem::Version.new('8.1')
+          # Rails' generated-column options: a stored column is MATERIALIZED, a virtual one is ALIAS.
+          if options[:as]
+            if options_include_default?(options)
+              raise ArgumentError, "Column #{options[:column].name}: a column with 'as' cannot also have a default"
+            end
+
+            sql << (options[:stored] ? " MATERIALIZED " : " ALIAS ") << options[:as]
+          elsif ::ActiveRecord::version >= Gem::Version.new('8.1')
             sql << " DEFAULT #{quote_default_expression_for_column_definition(options[:default], options[:column])}" if options_include_default?(options)
           else
             sql << " DEFAULT #{quote_default_expression(options[:default], options[:column])}" if options_include_default?(options)
           end
+          # ClickHouse accepts CODEC only after the DEFAULT, MATERIALIZED or ALIAS expression.
+          sql << " CODEC(#{options[:codec]})" if options[:codec]
           sql
         end
 
