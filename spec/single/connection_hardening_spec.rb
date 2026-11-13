@@ -181,12 +181,23 @@ RSpec.describe 'Connection hardening' do
 
     connect_errors.each do |error|
       context "when the connection fails to open (#{error}), without retry_on_connect_error" do
-        it 'does not retry and raises ActiveRecord::ConnectionNotEstablished with the network error as its cause' do
+        it 'retries a read once and succeeds' do
+          call_count = 0
+          allow(http_connection).to receive(:post) do
+            call_count += 1
+            call_count == 1 ? raise(error) : success_response
+          end
+
+          expect(adapter.exec_query('SELECT 1').rows).to eq([[1]])
+          expect(call_count).to eq(2)
+        end
+
+        it 'only retries once, then raises ActiveRecord::ConnectionNotEstablished with the network error as its cause' do
           allow(http_connection).to receive(:post).and_raise(error)
 
           expect { adapter.exec_query('SELECT 1') }
             .to raise_error(ActiveRecord::ConnectionNotEstablished) { |e| expect(e.cause).to be_a(error) }
-          expect(http_connection).to have_received(:post).once
+          expect(http_connection).to have_received(:post).twice
         end
       end
     end
@@ -205,10 +216,10 @@ RSpec.describe 'Connection hardening' do
     context 'when retry_on_connect_error is the string "false", as Rails passes it from a URL' do
       let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db', retry_on_connect_error: 'false' } }
 
-      it 'does not retry a refused connection' do
+      it 'does not retry a write on a refused connection' do
         allow(http_connection).to receive(:post).and_raise(Errno::ECONNREFUSED)
 
-        expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ConnectionNotEstablished)
+        expect { adapter.exec_query('INSERT INTO t SELECT 1') }.to raise_error(ActiveRecord::ConnectionNotEstablished)
         expect(http_connection).to have_received(:post).once
       end
     end
@@ -229,11 +240,11 @@ RSpec.describe 'Connection hardening' do
             expect(call_count).to eq(2)
           end
 
-          it 'only retries once, then raises ActiveRecord::ConnectionNotEstablished' do
+          it 'retries in the session, then once more as a read, then raises ActiveRecord::ConnectionNotEstablished' do
             allow(http_connection).to receive(:post).and_raise(error)
 
             expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ConnectionNotEstablished)
-            expect(http_connection).to have_received(:post).twice
+            expect(http_connection).to have_received(:post).exactly(4).times
           end
         end
       end
@@ -426,6 +437,18 @@ RSpec.describe 'Connection hardening' do
       expect { adapter.execute_to_file('SELECT 1') }.to raise_error(ActiveRecord::ConnectionFailed)
       expect(http_connection).to have_received(:post).twice
       expect(http_connection).to have_received(:request).once
+    end
+
+    it 'does not report a full disk during #execute_to_file as a dropped connection' do
+      streaming_response = instance_double(Net::HTTPResponse, code: '200')
+      allow(streaming_response).to receive(:read_body).and_yield("id\n1\n")
+      allow(http_connection).to receive(:request) { |_request, _sql, &callback| callback.call(streaming_response) }
+      allow_any_instance_of(Tempfile).to receive(:write).and_raise(Errno::ENOSPC)
+
+      expect { adapter.execute_to_file('SELECT 1') }.to raise_error(ActiveRecord::ActiveRecordError) { |e|
+        expect(e).not_to be_a(ActiveRecord::ConnectionFailed)
+        expect(e.cause).to be_a(Errno::ENOSPC)
+      }
     end
   end
 end

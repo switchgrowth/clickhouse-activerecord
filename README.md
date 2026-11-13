@@ -140,8 +140,9 @@ clickhouse:
     `max_execution_time` or `cancel_http_readonly_queries_on_client_close`.
   - `ActiveRecord::StatementInvalid` - any other server error, such as a syntax error.
     `ConnectionFailed`, `AdapterTimeout` and `StatementTimeout` are also `StatementInvalid`.
-- **Reads are retried once** on a new connection when the connection drops
-  (`ActiveRecord::ConnectionFailed`) - the kind of failure a stale pooled connection produces. A
+- **Reads are retried once** on a new connection when the connection fails to open or drops
+  (`ActiveRecord::ConnectionNotEstablished` or `ActiveRecord::ConnectionFailed`) - the kind of
+  failure a stale pooled connection produces. A
   statement is a read when Rails passes `allow_retry: true` (Rails 7.2 and later, for a query it
   builds from Arel alone) or when it starts with `SELECT`, `WITH`, `SHOW`, `DESC`, `DESCRIBE`,
   `EXISTS` or `EXPLAIN`, after any comments or parentheses. Writes are never sent again, and a timeout

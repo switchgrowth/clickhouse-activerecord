@@ -82,8 +82,9 @@ module ActiveRecord
         # Rails 8.1's `query` passes `materialize_transactions:`. ClickHouse has no transaction to
         # materialize, so this method ignores the keyword.
         #
-        # A read runs once more on a new session when the connection drops. Rails 7.2 and later
-        # pass `allow_retry` for a query built from Arel alone, and Rails 7.1 never does, so any
+        # A read runs once more on a new session when the connection fails to open or drops, the
+        # errors Rails' `retryable_connection_error?` accepts. Rails 7.2 and later pass
+        # `allow_retry` for a query built from Arel alone, and Rails 7.1 never does, so any
         # statement that `write_query?` reads as a read also qualifies. A write never runs twice.
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false, allow_retry: false, materialize_transactions: true)
           retried = false
@@ -98,7 +99,7 @@ module ActiveRecord
               types[m['name']] = types[i] = type_map.lookup(m['type'])
             end
             ActiveRecord::Result.new(columns, result['data'], types)
-          rescue ActiveRecord::ConnectionFailed => e
+          rescue ActiveRecord::ConnectionFailed, ActiveRecord::ConnectionNotEstablished => e
             raise if retried || (!allow_retry && write_query?(sql))
 
             retried = true

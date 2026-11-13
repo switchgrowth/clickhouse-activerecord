@@ -33,10 +33,10 @@ module ActiveRecord
 
           # @return [Tempfile]
           def streaming_process
-            file = Tempfile.new('clickhouse-activerecord', binmode: true)
+            file = with_local_file { Tempfile.new('clickhouse-activerecord', binmode: true) }
             if success?
               @raw_response.read_body do |chunk|
-                file.write(chunk)
+                with_local_file { file.write(chunk) }
               end
               file.rewind
               file
@@ -47,6 +47,14 @@ module ActiveRecord
           end
 
           private
+
+          # This runs inside `with_http_session`, which reads a system call error as a dropped
+          # connection. A full disk is not one, so it leaves here as an ActiveRecordError.
+          def with_local_file
+            yield
+          rescue SystemCallError, IOError => e
+            raise ActiveRecord::ActiveRecordError, "Could not write the streamed result to a file: #{e.message}"
+          end
 
           def success?
             @raw_response.code.to_i == 200
