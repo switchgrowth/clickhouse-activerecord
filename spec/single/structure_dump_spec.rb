@@ -94,7 +94,8 @@ RSpec.describe 'Structure dump', :migrations do
   end
 
   it 'keeps the SQL unchanged when the configuration names no database' do
-    ActiveRecord::Base.establish_connection(ActiveRecord::Base.connection_db_config.configuration_hash.except(:database))
+    # Rails 7.1 connects through `clickhouse_connection`, which needs the database key.
+    ActiveRecord::Base.establish_connection(ActiveRecord::Base.connection_db_config.configuration_hash.merge(database: nil))
     ActiveRecord::Base.connection.execute(<<~SQL)
       CREATE TABLE default.structure_spec (id UInt64, extension String DEFAULT '.csv') ENGINE = MergeTree ORDER BY id
     SQL
