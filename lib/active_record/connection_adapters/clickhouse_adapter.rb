@@ -135,12 +135,17 @@ module ActiveRecord
         json: { name: 'JSON' },
       }.freeze
 
+      READ_QUERY = ActiveRecord::ConnectionAdapters::AbstractAdapter.build_read_query_regexp(
+        :describe, :desc, :exists, :show
+      ) # :nodoc:
+      private_constant :READ_QUERY
+
       include Clickhouse::SchemaStatements
 
       # our `execute` shadows the wrapper `QueryCache` installs on `AbstractAdapter`
       ActiveRecord::ConnectionAdapters::QueryCache.dirties_query_cache(self, :execute)
 
-      # Initializes and connects a Clickhouse adapter.
+      # Initializes a Clickhouse adapter. The connection opens on the first request.
       def initialize(config_or_deprecated_connection, deprecated_logger = nil, deprecated_connection_options = nil, deprecated_config = nil)
         if config_or_deprecated_connection.is_a?(Hash) && config_or_deprecated_connection[:url]
           config_or_deprecated_connection = config_or_deprecated_connection.dup
@@ -191,6 +196,12 @@ module ActiveRecord
       def disconnect!
         @connection.finish if @connection&.started?
         super
+      end
+
+      def write_query?(sql) # :nodoc:
+        !READ_QUERY.match?(sql)
+      rescue ArgumentError # Invalid encoding
+        !READ_QUERY.match?(sql.b)
       end
 
       # Return ClickHouse server version
@@ -674,15 +685,15 @@ module ActiveRecord
         end
       end
 
+      # Opens no socket: `with_http_session` starts the session before the first request, so a
+      # failure to open it gets the same error class and retry as on any later request.
       def connect
-        @connection = @connection_parameters[:connection] || Net::HTTP.start(
-          @connection_parameters[:host],
-          @connection_parameters[:port],
-          use_ssl: @connection_parameters[:ssl],
-          verify_mode: @connection_parameters[:insecure] ? OpenSSL::SSL::VERIFY_NONE : OpenSSL::SSL::VERIFY_PEER,
-          **{ open_timeout: @connection_parameters[:open_timeout] }.compact
-        )
+        @connection = @connection_parameters[:connection] || Net::HTTP.new(@connection_parameters[:host], @connection_parameters[:port]).tap do |http|
+          http.use_ssl = @connection_parameters[:ssl]
+          http.verify_mode = @connection_parameters[:insecure] ? OpenSSL::SSL::VERIFY_NONE : OpenSSL::SSL::VERIFY_PEER
+        end
 
+        @connection.open_timeout = @connection_parameters[:open_timeout] if @connection_parameters[:open_timeout]
         @connection.ca_file = @connection_parameters[:sslca] if @connection_parameters[:sslca]
         @connection.read_timeout = @connection_parameters[:read_timeout] if @connection_parameters[:read_timeout]
         @connection.write_timeout = @connection_parameters[:write_timeout] if @connection_parameters[:write_timeout]
@@ -695,6 +706,19 @@ module ActiveRecord
 
       def reconnect
         connect
+      end
+
+      def translate_exception(exception, message:, sql:, binds:)
+        case exception
+        when *CONNECT_ERRORS
+          ActiveRecord::ConnectionNotEstablished.new(message, connection_pool: @pool)
+        when *CONNECTION_LOST_ERRORS
+          ActiveRecord::ConnectionFailed.new(message, sql: sql, binds: binds, connection_pool: @pool)
+        when Net::ReadTimeout, Net::WriteTimeout
+          ActiveRecord::AdapterTimeout.new(message, sql: sql, binds: binds, connection_pool: @pool)
+        else
+          super
+        end
       end
 
       def apply_replica(table, options)

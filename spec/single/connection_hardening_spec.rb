@@ -6,6 +6,9 @@ RSpec.describe 'Connection hardening' do
   let(:success_response) { instance_double(Net::HTTPResponse, code: '200', body: success_body) }
 
   before do
+    allow(http_connection).to receive(:use_ssl=)
+    allow(http_connection).to receive(:verify_mode=)
+    allow(http_connection).to receive(:open_timeout=)
     allow(http_connection).to receive(:keep_alive_timeout=)
     allow(http_connection).to receive(:read_timeout=)
     allow(http_connection).to receive(:write_timeout=)
@@ -15,37 +18,31 @@ RSpec.describe 'Connection hardening' do
   end
 
   describe 'connect' do
-    def net_http_start_args
-      args = nil
-      allow(Net::HTTP).to receive(:start) do |*a, **kw|
-        args = { args: a, kwargs: kw }
-        http_connection
-      end
-      ActiveRecord::Base.clickhouse_connection(config)
-      args
+    subject(:client) { ActiveRecord::Base.clickhouse_connection(config).instance_variable_get(:@connection) }
+
+    let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db' } }
+
+    it 'opens no socket until the first request' do
+      expect(client).not_to be_started
     end
 
     context 'without open_timeout configured' do
-      let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db' } }
-
-      it 'does not pass open_timeout to Net::HTTP.start, preserving its own default' do
-        expect(net_http_start_args[:kwargs]).not_to have_key(:open_timeout)
+      it "keeps Net::HTTP's own default" do
+        expect(client.open_timeout).to eq(Net::HTTP.new('localhost').open_timeout)
       end
     end
 
     context 'with open_timeout configured' do
       let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db', open_timeout: 5 } }
 
-      it 'passes it through to Net::HTTP.start' do
-        expect(net_http_start_args[:kwargs][:open_timeout]).to eq(5)
+      it 'sets it on the client' do
+        expect(client.open_timeout).to eq(5)
       end
     end
 
     context 'by default' do
-      let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db' } }
-
       it 'does not verify the TLS certificate, matching prior behavior' do
-        expect(net_http_start_args[:kwargs][:verify_mode]).to eq(OpenSSL::SSL::VERIFY_NONE)
+        expect(client.verify_mode).to eq(OpenSSL::SSL::VERIFY_NONE)
       end
     end
 
@@ -53,16 +50,15 @@ RSpec.describe 'Connection hardening' do
       let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db', insecure: false } }
 
       it 'verifies the TLS certificate' do
-        expect(net_http_start_args[:kwargs][:verify_mode]).to eq(OpenSSL::SSL::VERIFY_PEER)
+        expect(client.verify_mode).to eq(OpenSSL::SSL::VERIFY_PEER)
       end
     end
 
     context 'with sslca configured' do
       let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db', sslca: '/path/to/ca.pem' } }
 
-      it 'sets ca_file on the connection' do
-        net_http_start_args
-        expect(http_connection).to have_received(:ca_file=).with('/path/to/ca.pem')
+      it 'sets ca_file on the client' do
+        expect(client.ca_file).to eq('/path/to/ca.pem')
       end
     end
   end
@@ -80,7 +76,7 @@ RSpec.describe 'Connection hardening' do
 
     subject(:adapter) { ActiveRecord::Base.clickhouse_connection(config) }
 
-    before { allow(Net::HTTP).to receive(:start).and_return(http_connection) }
+    before { allow(Net::HTTP).to receive(:new).and_return(http_connection) }
 
     it 'merges max_execution_time into the request params sent with every query' do
       expect(adapter.instance_variable_get(:@connection_config)[:max_execution_time]).to eq(25)
@@ -91,48 +87,86 @@ RSpec.describe 'Connection hardening' do
     end
   end
 
-  describe '#exec_query' do
-    let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db' } }
-
+  shared_context 'with a stubbed client' do
     subject(:adapter) { ActiveRecord::Base.clickhouse_connection(config) }
 
-    before { allow(Net::HTTP).to receive(:start).and_return(http_connection) }
+    let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db' } }
 
-    context 'on a fast connection-level failure' do
-      it 'retries once on a fresh connection and succeeds' do
+    before { allow(Net::HTTP).to receive(:new).and_return(http_connection) }
+  end
+
+  connect_errors = [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ENETUNREACH]
+  connection_lost_errors = [EOFError, IOError, Errno::ECONNRESET, Errno::EPIPE, Errno::ETIMEDOUT, OpenSSL::SSL::SSLError]
+
+  describe '#exec_query' do
+    include_context 'with a stubbed client'
+
+    connection_lost_errors.each do |error|
+      context "when the connection drops (#{error})" do
+        it 'retries a read once on a new connection and succeeds' do
+          call_count = 0
+          allow(http_connection).to receive(:post) do
+            call_count += 1
+            call_count == 1 ? raise(error) : success_response
+          end
+
+          expect(adapter.exec_query('SELECT 1').rows).to eq([[1]])
+          expect(call_count).to eq(2)
+        end
+
+        it 'only retries once, then raises ActiveRecord::ConnectionFailed with the network error as its cause' do
+          allow(http_connection).to receive(:post).and_raise(error)
+
+          expect { adapter.exec_query('SELECT 1') }
+            .to raise_error(ActiveRecord::ConnectionFailed) { |e| expect(e.cause).to be_a(error) }
+          expect(http_connection).to have_received(:post).twice
+        end
+      end
+    end
+
+    context 'when the connection drops on a write' do
+      it 'does not run it again' do
+        allow(http_connection).to receive(:post).and_raise(Errno::ECONNRESET)
+
+        expect { adapter.exec_query('INSERT INTO t SELECT 1') }.to raise_error(ActiveRecord::ConnectionFailed)
+        expect(http_connection).to have_received(:post).once
+      end
+    end
+
+    context 'when the connection drops on a statement that Rails passes with allow_retry' do
+      it 'runs it again' do
         call_count = 0
         allow(http_connection).to receive(:post) do
           call_count += 1
           call_count == 1 ? raise(Errno::ECONNRESET) : success_response
         end
 
-        result = adapter.exec_query('SELECT 1')
+        adapter.internal_exec_query('OPTIMIZE TABLE t', 'SQL', [], allow_retry: true)
 
         expect(call_count).to eq(2)
-        expect(result.rows).to eq([[1]])
-      end
-
-      it 'only retries once, then raises ActiveRecord::ConnectionFailed' do
-        allow(http_connection).to receive(:post).and_raise(EOFError)
-
-        expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ConnectionFailed)
-        expect(http_connection).to have_received(:post).twice
       end
     end
 
-    context 'when the connection fails to open, without retry_on_connect_error' do
-      it 'does not retry a refused connection' do
-        allow(http_connection).to receive(:post).and_raise(Errno::ECONNREFUSED)
+    connect_errors.each do |error|
+      context "when the connection fails to open (#{error}), without retry_on_connect_error" do
+        it 'does not retry and raises ActiveRecord::ConnectionNotEstablished with the network error as its cause' do
+          allow(http_connection).to receive(:post).and_raise(error)
 
-        expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ActiveRecordError, /refused/)
-        expect(http_connection).to have_received(:post).once
+          expect { adapter.exec_query('SELECT 1') }
+            .to raise_error(ActiveRecord::ConnectionNotEstablished) { |e| expect(e.cause).to be_a(error) }
+          expect(http_connection).to have_received(:post).once
+        end
+      end
+    end
+
+    context 'when the first request of a new adapter fails to open the connection' do
+      before do
+        allow(http_connection).to receive(:started?).and_return(false)
+        allow(http_connection).to receive(:start).and_raise(SocketError)
       end
 
-      it 'retries a read that times out opening once, then raises ActiveRecord::ConnectionFailed' do
-        allow(http_connection).to receive(:post).and_raise(Net::OpenTimeout)
-
-        expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ConnectionFailed)
-        expect(http_connection).to have_received(:post).twice
+      it 'raises ActiveRecord::ConnectionNotEstablished' do
+        expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ConnectionNotEstablished)
       end
     end
 
@@ -142,7 +176,7 @@ RSpec.describe 'Connection hardening' do
       it 'does not retry a refused connection' do
         allow(http_connection).to receive(:post).and_raise(Errno::ECONNREFUSED)
 
-        expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ActiveRecordError, /refused/)
+        expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ConnectionNotEstablished)
         expect(http_connection).to have_received(:post).once
       end
     end
@@ -150,7 +184,7 @@ RSpec.describe 'Connection hardening' do
     context 'with retry_on_connect_error' do
       let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db', retry_on_connect_error: true } }
 
-      [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED].each do |error|
+      connect_errors.each do |error|
         context "when the connection fails to open (#{error})" do
           it 'retries once and succeeds' do
             call_count = 0
@@ -193,7 +227,7 @@ RSpec.describe 'Connection hardening' do
         end
       end
 
-      context 'when reopening a finished session fails to open' do
+      context 'when the first request of a new adapter fails to open the connection' do
         before do
           started = false
           start_count = 0
@@ -227,12 +261,14 @@ RSpec.describe 'Connection hardening' do
       end
     end
 
-    context 'on Net::ReadTimeout' do
-      it 'does not retry and raises ActiveRecord::AdapterTimeout instead' do
-        allow(http_connection).to receive(:post).and_raise(Net::ReadTimeout)
+    [Net::ReadTimeout, Net::WriteTimeout].each do |error|
+      context "on #{error}" do
+        it 'does not retry and raises ActiveRecord::AdapterTimeout instead' do
+          allow(http_connection).to receive(:post).and_raise(error)
 
-        expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::AdapterTimeout)
-        expect(http_connection).to have_received(:post).once
+          expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::AdapterTimeout)
+          expect(http_connection).to have_received(:post).once
+        end
       end
     end
 
@@ -248,32 +284,68 @@ RSpec.describe 'Connection hardening' do
         expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::StatementTimeout)
       end
     end
+
+    context 'when the server rejects the statement' do
+      it 'raises ActiveRecord::StatementInvalid' do
+        response = instance_double(
+          Net::HTTPResponse,
+          code: '400',
+          body: 'Code: 62. DB::Exception: Syntax error: failed at position 1 (SYNTAX_ERROR)'
+        )
+        allow(http_connection).to receive(:post).and_return(response)
+
+        expect { adapter.exec_query('SELEC 1') }.to raise_error(ActiveRecord::StatementInvalid, /SYNTAX_ERROR/)
+      end
+    end
   end
 
   describe '#exec_insert_all' do
-    let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db' } }
+    include_context 'with a stubbed client'
+
     let(:insert) { 'INSERT INTO t (id) VALUES (1)' }
     let(:insert_response) { instance_double(Net::HTTPResponse, code: '200', body: '') }
 
-    subject(:adapter) { ActiveRecord::Base.clickhouse_connection(config) }
-
-    before { allow(Net::HTTP).to receive(:start).and_return(http_connection) }
-
-    [Net::OpenTimeout, Errno::ECONNREFUSED].each do |error|
+    connect_errors.each do |error|
       context "when the connection fails to open (#{error}), without retry_on_connect_error" do
-        it 'does not retry' do
+        it 'does not retry and raises ActiveRecord::ConnectionNotEstablished' do
           allow(http_connection).to receive(:post).and_raise(error)
 
-          expect { adapter.exec_insert_all(insert, 'Bulk Insert') }.to raise_error(error)
+          expect { adapter.exec_insert_all(insert, 'Bulk Insert') }
+            .to raise_error(ActiveRecord::ConnectionNotEstablished) { |e| expect(e.cause).to be_a(error) }
           expect(http_connection).to have_received(:post).once
         end
+      end
+    end
+
+    connection_lost_errors.each do |error|
+      context "when the connection drops (#{error})" do
+        it 'does not retry, so the server cannot apply the insert twice, and raises ActiveRecord::ConnectionFailed' do
+          allow(http_connection).to receive(:post).and_raise(error)
+
+          expect { adapter.exec_insert_all(insert, 'Bulk Insert') }
+            .to raise_error(ActiveRecord::ConnectionFailed) { |e| expect(e.cause).to be_a(error) }
+          expect(http_connection).to have_received(:post).once
+        end
+      end
+    end
+
+    context 'when the server rejects the statement' do
+      it 'raises ActiveRecord::StatementInvalid' do
+        response = instance_double(
+          Net::HTTPResponse,
+          code: '400',
+          body: 'Code: 168. DB::Exception: AST is too big. Maximum: 50000 (TOO_BIG_AST)'
+        )
+        allow(http_connection).to receive(:post).and_return(response)
+
+        expect { adapter.exec_insert_all(insert, 'Bulk Insert') }.to raise_error(ActiveRecord::StatementInvalid, /TOO_BIG_AST/)
       end
     end
 
     context 'with retry_on_connect_error' do
       let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db', retry_on_connect_error: true } }
 
-      [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED].each do |error|
+      connect_errors.each do |error|
         context "when the connection fails to open (#{error})" do
           it 'retries once and succeeds' do
             call_count = 0
@@ -295,14 +367,12 @@ RSpec.describe 'Connection hardening' do
         end
       end
 
-      [EOFError, Errno::ECONNRESET, IOError].each do |error|
-        context "when an open connection drops (#{error})" do
-          it 'does not retry, so the server cannot apply the insert twice' do
-            allow(http_connection).to receive(:post).and_raise(error)
+      context 'when the connection drops (Errno::ECONNRESET)' do
+        it 'does not retry' do
+          allow(http_connection).to receive(:post).and_raise(Errno::ECONNRESET)
 
-            expect { adapter.exec_insert_all(insert, 'Bulk Insert') }.to raise_error(error)
-            expect(http_connection).to have_received(:post).once
-          end
+          expect { adapter.exec_insert_all(insert, 'Bulk Insert') }.to raise_error(ActiveRecord::ConnectionFailed)
+          expect(http_connection).to have_received(:post).once
         end
       end
     end

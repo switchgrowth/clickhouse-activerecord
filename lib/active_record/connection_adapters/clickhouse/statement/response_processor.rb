@@ -59,8 +59,9 @@ module ActiveRecord
             format_body_response
           end
 
+          # As in Rails' own adapters, a server error with no more specific class is StatementInvalid.
           def raise_generic!(sql = nil)
-            raise ActiveRecord::ActiveRecordError, "Response code: #{@raw_response.code}:\n#{@body}#{"\nQuery: #{sql}" if sql}"
+            raise ActiveRecord::StatementInvalid.new("Response code: #{@raw_response.code}:\n#{@body}#{"\nQuery: #{sql}" if sql}", sql: sql)
           end
 
           def format_body_response

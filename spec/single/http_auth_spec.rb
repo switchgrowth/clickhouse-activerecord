@@ -23,7 +23,8 @@ RSpec.describe 'HTTP auth modes' do
   subject(:adapter) { ActiveRecord::Base.clickhouse_connection(config) }
 
   before do
-    allow(Net::HTTP).to receive(:start).and_return(http_connection)
+    allow(Net::HTTP).to receive(:new).and_return(http_connection)
+    allow(http_connection).to receive_messages(:use_ssl= => nil, :verify_mode= => nil)
     allow(http_connection).to receive(:keep_alive_timeout=)
     allow(http_connection).to receive(:started?).and_return(true)
     allow(http_connection).to receive(:post).and_return(response)
