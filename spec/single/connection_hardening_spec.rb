@@ -11,6 +11,7 @@ RSpec.describe 'Connection hardening' do
     allow(http_connection).to receive(:write_timeout=)
     allow(http_connection).to receive(:ca_file=)
     allow(http_connection).to receive(:started?).and_return(true)
+    allow(http_connection).to receive(:finish)
   end
 
   describe 'connect' do
@@ -97,7 +98,7 @@ RSpec.describe 'Connection hardening' do
 
     before { allow(Net::HTTP).to receive(:start).and_return(http_connection) }
 
-    context 'on a fast connection-level failure' do
+    context 'when an open connection drops' do
       it 'retries once on a fresh connection and succeeds' do
         call_count = 0
         allow(http_connection).to receive(:post) do
@@ -119,23 +120,58 @@ RSpec.describe 'Connection hardening' do
       end
     end
 
-    context 'when the connection never opens' do
-      it 'retries once on SocketError and succeeds' do
-        call_count = 0
-        allow(http_connection).to receive(:post) do
-          call_count += 1
-          call_count == 1 ? raise(SocketError) : success_response
+    [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED].each do |error|
+      context "when the connection fails to open (#{error})" do
+        it 'retries once and succeeds' do
+          call_count = 0
+          allow(http_connection).to receive(:post) do
+            call_count += 1
+            call_count == 1 ? raise(error) : success_response
+          end
+
+          expect(adapter.exec_query('SELECT 1').rows).to eq([[1]])
+          expect(call_count).to eq(2)
         end
 
-        expect(adapter.exec_query('SELECT 1').rows).to eq([[1]])
-        expect(call_count).to eq(2)
+        it 'only retries once, then raises ActiveRecord::ConnectionNotEstablished' do
+          allow(http_connection).to receive(:post).and_raise(error)
+
+          expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ConnectionNotEstablished)
+          expect(http_connection).to have_received(:post).twice
+        end
+      end
+    end
+
+    context 'when reopening a finished session fails to open' do
+      before do
+        started = false
+        start_count = 0
+        allow(http_connection).to receive(:started?) { started }
+        allow(http_connection).to receive(:start) do
+          start_count += 1
+          raise Errno::ECONNREFUSED if start_count == 1
+
+          started = true
+        end
       end
 
-      it 'only retries once, then raises ActiveRecord::ConnectionFailed' do
-        allow(http_connection).to receive(:post).and_raise(Errno::ECONNREFUSED)
+      it 'retries a query once and succeeds' do
+        allow(http_connection).to receive(:post).and_return(success_response)
 
-        expect { adapter.exec_query('SELECT 1') }.to raise_error(ActiveRecord::ConnectionFailed)
-        expect(http_connection).to have_received(:post).twice
+        expect(adapter.exec_query('SELECT 1').rows).to eq([[1]])
+        expect(http_connection).to have_received(:start).twice
+      end
+
+      it 'retries a streamed query once and succeeds' do
+        streaming_response = instance_double(Net::HTTPResponse, code: '200')
+        allow(streaming_response).to receive(:read_body).and_yield("id\n1\n")
+        allow(http_connection).to receive(:request) { |_request, _sql, &callback| callback.call(streaming_response) }
+
+        file = adapter.execute_to_file('SELECT 1')
+
+        expect(file.read).to eq("id\n1\n")
+        expect(http_connection).to have_received(:start).twice
+        file.close!
       end
     end
 
@@ -172,7 +208,7 @@ RSpec.describe 'Connection hardening' do
     before { allow(Net::HTTP).to receive(:start).and_return(http_connection) }
 
     [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED].each do |error|
-      context "when the connection never opens (#{error})" do
+      context "when the connection fails to open (#{error})" do
         it 'retries once and succeeds' do
           call_count = 0
           allow(http_connection).to receive(:post) do
@@ -184,10 +220,10 @@ RSpec.describe 'Connection hardening' do
           expect(call_count).to eq(2)
         end
 
-        it 'only retries once, then raises ActiveRecord::ConnectionFailed' do
+        it 'only retries once, then raises ActiveRecord::ConnectionNotEstablished' do
           allow(http_connection).to receive(:post).and_raise(error)
 
-          expect { adapter.exec_insert_all(insert, 'Bulk Insert') }.to raise_error(ActiveRecord::ConnectionFailed)
+          expect { adapter.exec_insert_all(insert, 'Bulk Insert') }.to raise_error(ActiveRecord::ConnectionNotEstablished)
           expect(http_connection).to have_received(:post).twice
         end
       end
