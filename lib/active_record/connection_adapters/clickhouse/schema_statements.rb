@@ -172,6 +172,8 @@ module ActiveRecord
           result['data'].flatten
         end
 
+        # A user-defined function belongs to the server, not the database, so the server may already
+        # have it when a schema loads into another database. CREATE OR REPLACE lets the load continue.
         def show_create_function(function)
           result = do_system_execute("SELECT create_query FROM system.functions WHERE origin = 'SQLUserDefined' AND name = '#{function}'")
           return if result.nil?
