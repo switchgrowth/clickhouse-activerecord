@@ -2,6 +2,8 @@
 
 require 'active_record/connection_adapters/clickhouse_adapter'
 
+require 'core_extensions/active_record/insert_all'
+require 'core_extensions/active_record/insert_all/builder'
 require 'core_extensions/active_record/internal_metadata'
 require 'core_extensions/active_record/relation'
 require 'core_extensions/active_record/schema_migration'
@@ -10,9 +12,6 @@ require 'core_extensions/arel/nodes/select_core'
 require 'core_extensions/arel/nodes/select_statement'
 require 'core_extensions/arel/select_manager'
 require 'core_extensions/arel/table'
-require 'core_extensions/active_record/insert_all'
-require 'core_extensions/active_record/insert_all/builder'
-
 
 if defined?(Rails::Railtie)
   require 'clickhouse-activerecord/railtie'
@@ -24,21 +23,16 @@ end
 
 module ClickhouseActiverecord
   def self.load
+    ActiveRecord::InsertAll.prepend(CoreExtensions::ActiveRecord::InsertAll)
+    ActiveRecord::InsertAll::Builder.prepend(CoreExtensions::ActiveRecord::InsertAll::Builder)
     ActiveRecord::InternalMetadata.prepend(CoreExtensions::ActiveRecord::InternalMetadata)
     ActiveRecord::Migration::CommandRecorder.include(CoreExtensions::ActiveRecord::Migration::CommandRecorder)
     ActiveRecord::Relation.prepend(CoreExtensions::ActiveRecord::Relation)
     ActiveRecord::SchemaMigration.prepend(CoreExtensions::ActiveRecord::SchemaMigration)
 
-    # Select extensions
     Arel::Nodes::SelectCore.prepend(CoreExtensions::Arel::Nodes::SelectCore)
     Arel::Nodes::SelectStatement.prepend(CoreExtensions::Arel::Nodes::SelectStatement)
     Arel::SelectManager.prepend(CoreExtensions::Arel::SelectManager)
-
-    # Insert extensions
-    ActiveRecord::InsertAll.prepend(CoreExtensions::ActiveRecord::InsertAll)
-    ActiveRecord::InsertAll::Builder.prepend(CoreExtensions::ActiveRecord::InsertAll::Builder)
-
-    # Table extensions
     Arel::Table.prepend(CoreExtensions::Arel::Table)
 
     # Prevent TimeZoneConverter wrapping for Map OID with DateTime subtype.
