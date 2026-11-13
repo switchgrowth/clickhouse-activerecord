@@ -153,17 +153,19 @@ module ActiveRecord
             connection: @config[:connection]
           }
         else
-          port = @config[:port] || 8123
+          # Rails gives the query parameters of a clickhouse:// URL, and a quoted value in database.yml,
+          # as strings, so each setting is cast where it is read.
+          port = self.class.type_cast_config_to_integer(@config[:port]) || 8123
           connection = {
             host: @config[:host] || 'localhost',
             port: port,
-            ssl: @config[:ssl].present? ? @config[:ssl] : port == 443,
-            insecure: @config.fetch(:insecure, true),
+            ssl: @config[:ssl].to_s.empty? ? port == 443 : self.class.type_cast_config_to_boolean(@config[:ssl]),
+            insecure: self.class.type_cast_config_to_boolean(@config.fetch(:insecure, true)),
             sslca: @config[:sslca],
-            open_timeout: @config[:open_timeout],
-            read_timeout: @config[:read_timeout],
-            write_timeout: @config[:write_timeout],
-            keep_alive_timeout: @config[:keep_alive_timeout]
+            open_timeout: self.class.type_cast_config_to_integer(@config[:open_timeout]),
+            read_timeout: self.class.type_cast_config_to_integer(@config[:read_timeout]),
+            write_timeout: self.class.type_cast_config_to_integer(@config[:write_timeout]),
+            keep_alive_timeout: self.class.type_cast_config_to_integer(@config[:keep_alive_timeout])
           }
         end
         @connection_parameters = connection
@@ -172,14 +174,14 @@ module ActiveRecord
           user: @config[:username],
           password: @config[:password],
           database: @config[:database],
-          max_execution_time: @config[:max_execution_time],
-          cancel_http_readonly_queries_on_client_close: @config[:cancel_http_readonly_queries_on_client_close],
+          max_execution_time: self.class.type_cast_config_to_integer(@config[:max_execution_time]),
+          cancel_http_readonly_queries_on_client_close: self.class.type_cast_config_to_boolean(@config[:cancel_http_readonly_queries_on_client_close]),
         }.compact
-        @debug = @config[:debug] || false
+        @debug = self.class.type_cast_config_to_boolean(@config[:debug]) || false
         @default_response_format = @config[:format] || DEFAULT_RESPONSE_FORMAT
         @http_auth = @config[:http_auth]&.to_sym
         # Rails passes the query parameters of a `clickhouse://` URL through as strings, so "false" must be cast.
-        @retry_on_connect_error = ActiveModel::Type::Boolean.new.cast(@config[:retry_on_connect_error]) || false
+        @retry_on_connect_error = self.class.type_cast_config_to_boolean(@config[:retry_on_connect_error]) || false
 
         @prepared_statements = false
 
@@ -578,7 +580,7 @@ module ActiveRecord
       end
 
       def use_default_replicated_merge_tree_params?
-        database_engine_atomic? && @config[:use_default_replicated_merge_tree_params]
+        database_engine_atomic? && self.class.type_cast_config_to_boolean(@config[:use_default_replicated_merge_tree_params])
       end
 
       def use_replica?
