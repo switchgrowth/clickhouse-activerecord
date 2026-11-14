@@ -2,7 +2,7 @@
 
 RSpec.describe 'URL-based configuration' do
   let(:http_connection) { instance_double(Net::HTTP) }
-  let(:response) { instance_double(Net::HTTPResponse, code: '200', body: '') }
+  let(:response) { instance_double(Net::HTTPResponse, code: '200', body: '', '[]': nil) }
 
   before do
     allow(Net::HTTP).to receive(:new).and_return(http_connection)

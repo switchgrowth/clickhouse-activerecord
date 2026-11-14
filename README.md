@@ -36,7 +36,7 @@ default: &default
   replica_name: '{replica}' # replica macros name, optional for creating replicated tables
   read_timeout: 300 # change network timeouts, by default 60 seconds
   write_timeout: 300
-  keep_alive_timeout: 300
+  keep_alive_timeout: 9 # optional, the longest the client reuses an idle connection (default: one second less than the server's keep_alive_timeout)
   open_timeout: 5 # timeout for establishing the TCP connection itself, optional (Net::HTTP's default applies if unset)
   retry_on_connect_error: true # optional, retry any statement once when the connection fails to open (default: false)
   insecure: false # optional, skip TLS certificate verification (default: true, matching prior behavior - set to false to verify)
@@ -58,7 +58,7 @@ default: &default
 Optional settings can be passed as query parameters:
 
 ```
-clickhouse://username:password@localhost:8123/database?ssl=true&http_auth=basic&read_timeout=300&write_timeout=300&keep_alive_timeout=300&open_timeout=5&debug=false&cluster_name=my_cluster
+clickhouse://username:password@localhost:8123/database?ssl=true&http_auth=basic&read_timeout=300&write_timeout=300&keep_alive_timeout=9&open_timeout=5&debug=false&cluster_name=my_cluster
 ```
 
 Supported query parameters: `ssl` (true/false), `debug` (true/false), `insecure` (true/false), `http_auth` (query_params/basic/x_clickhouse_headers), `open_timeout`, `read_timeout`, `write_timeout`, `keep_alive_timeout`, `max_execution_time` (integers), `cancel_http_readonly_queries_on_client_close` (true/false), `retry_on_connect_error` (true/false), `cluster_name`, `sslca`.
@@ -122,6 +122,13 @@ clickhouse:
   never completes the TCP handshake (a dead route, a security group silently dropping packets)
   previously had no bound here at all. It bounds each attempt to open. Each retry below opens
   the connection again, so with `retry_on_connect_error` a read can open it up to four times.
+- **The client stops reusing an idle connection one second before the server closes it.**
+  ClickHouse gives its `keep_alive_timeout` in each response's `Keep-Alive` header, and a request
+  on a socket the server is closing fails as a dropped connection. A configured
+  `keep_alive_timeout` can only shorten this. When a response has no `Keep-Alive` header, as
+  behind a proxy that removes it, the configured `keep_alive_timeout` applies, or `Net::HTTP`'s
+  default of 2 seconds when none is set. Behind a proxy or load balancer, set
+  `keep_alive_timeout` below its idle timeout. A server timeout of 1 second turns reuse off.
 - **The connection opens on the first request**, not when the adapter is created, so a failure
   to open it raises the same error class, and gets the same retry, as on any later request.
   `verify!` and `reconnect!` open it at once, so they still fail when the server is unreachable.

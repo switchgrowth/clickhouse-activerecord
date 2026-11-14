@@ -701,8 +701,8 @@ module ActiveRecord
         @connection.read_timeout = @connection_parameters[:read_timeout] if @connection_parameters[:read_timeout]
         @connection.write_timeout = @connection_parameters[:write_timeout] if @connection_parameters[:write_timeout]
 
-        # Use clickhouse default keep_alive_timeout value of 10, rather than Net::HTTP's default of 2
-        @connection.keep_alive_timeout = @connection_parameters[:keep_alive_timeout] || 10
+        limit = keep_alive_limit
+        @connection.keep_alive_timeout = limit if limit
 
         @connection
       end

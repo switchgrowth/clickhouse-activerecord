@@ -3,7 +3,7 @@
 RSpec.describe 'Connection hardening' do
   let(:http_connection) { instance_double(Net::HTTP) }
   let(:success_body) { %(["result"]\n["UInt8"]\n[1]\n) }
-  let(:success_response) { instance_double(Net::HTTPResponse, code: '200', body: success_body) }
+  let(:success_response) { instance_double(Net::HTTPResponse, code: '200', body: success_body, '[]': nil) }
 
   before do
     allow(http_connection).to receive(:use_ssl=)
@@ -29,6 +29,12 @@ RSpec.describe 'Connection hardening' do
     context 'without open_timeout configured' do
       it "keeps Net::HTTP's own default" do
         expect(client.open_timeout).to eq(Net::HTTP.new('localhost').open_timeout)
+      end
+    end
+
+    context 'without keep_alive_timeout configured' do
+      it "keeps Net::HTTP's own default until a response gives the server's timeout" do
+        expect(client.keep_alive_timeout).to eq(Net::HTTP.new('localhost').keep_alive_timeout)
       end
     end
 
@@ -98,6 +104,121 @@ RSpec.describe 'Connection hardening' do
     EOFError, IOError, Errno::ECONNRESET, Errno::ECONNABORTED, Errno::EPIPE, Errno::ETIMEDOUT,
     Errno::EHOSTUNREACH, Errno::ENETUNREACH, Errno::ENETDOWN, OpenSSL::SSL::SSLError
   ]
+
+  describe 'keep-alive timeout' do
+    subject(:adapter) { ActiveRecord::Base.clickhouse_connection(config) }
+
+    let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db' } }
+    let(:client) { Net::HTTP.new('localhost', 8123) }
+
+    before do
+      real_client = client
+      allow(Net::HTTP).to receive(:new).and_return(real_client)
+      allow(real_client).to receive(:started?).and_return(true)
+    end
+
+    def response_with(keep_alive, code: '200', body: success_body)
+      instance_double(Net::HTTPResponse, code: code, body: body, '[]': nil).tap do |response|
+        allow(response).to receive(:[]).with('Keep-Alive').and_return(keep_alive)
+      end
+    end
+
+    def respond_with(*responses)
+      allow(client).to receive(:post).and_return(*responses)
+    end
+
+    it "stops reusing the socket one second before the server's timeout" do
+      respond_with(response_with('timeout=6, max=9999'))
+
+      adapter.exec_query('SELECT 1')
+
+      expect(client.keep_alive_timeout).to eq(5)
+    end
+
+    it 'follows the header on an error response, which can leave the socket open' do
+      respond_with(response_with('timeout=6, max=9999', code: '400', body: 'Code: 62. DB::Exception: Syntax error (SYNTAX_ERROR)'))
+
+      expect { adapter.exec_query('SELEC 1') }.to raise_error(ActiveRecord::StatementInvalid)
+      expect(client.keep_alive_timeout).to eq(5)
+    end
+
+    it 'follows the header on a streamed query too' do
+      streaming_response = response_with('timeout=6, max=9999')
+      allow(streaming_response).to receive(:read_body).and_yield("id\n1\n")
+      allow(client).to receive(:request) do |_request, _sql, &callback|
+        callback.call(streaming_response)
+        streaming_response
+      end
+
+      adapter.execute_to_file('SELECT 1').close!
+
+      expect(client.keep_alive_timeout).to eq(5)
+    end
+
+    it 'keeps its timeout when a later response has no Keep-Alive header, as behind a proxy that removes it' do
+      respond_with(response_with('timeout=6, max=9999'), response_with(nil))
+
+      2.times { adapter.exec_query('SELECT 1') }
+
+      expect(client.keep_alive_timeout).to eq(5)
+    end
+
+    it 'ignores a Keep-Alive header without a timeout' do
+      respond_with(response_with('timeout=6, max=9999'), response_with('max=9999'))
+
+      2.times { adapter.exec_query('SELECT 1') }
+
+      expect(client.keep_alive_timeout).to eq(5)
+    end
+
+    it 'turns reuse off when the server keeps an idle connection for 1 second' do
+      respond_with(response_with('timeout=1, max=9999'))
+
+      adapter.exec_query('SELECT 1')
+
+      expect(client.keep_alive_timeout).to eq(0)
+    end
+
+    context 'with keep_alive_timeout configured' do
+      let(:config) { { adapter: 'clickhouse', host: 'localhost', database: 'db', keep_alive_timeout: configured } }
+
+      context 'above the server timeout' do
+        let(:configured) { 300 }
+
+        it "lowers it to one second before the server's timeout" do
+          respond_with(response_with('timeout=6, max=9999'))
+
+          adapter.exec_query('SELECT 1')
+
+          expect(client.keep_alive_timeout).to eq(5)
+        end
+      end
+
+      context 'below the server timeout' do
+        let(:configured) { 3 }
+
+        it 'keeps the configured value' do
+          respond_with(response_with('timeout=6, max=9999'))
+
+          adapter.exec_query('SELECT 1')
+
+          expect(client.keep_alive_timeout).to eq(3)
+        end
+      end
+
+      context 'when no response has a Keep-Alive header' do
+        let(:configured) { 30 }
+
+        it 'uses the configured value' do
+          respond_with(response_with(nil))
+
+          adapter.exec_query('SELECT 1')
+
+          expect(client.keep_alive_timeout).to eq(30)
+        end
+      end
+    end
+  end
 
   describe '#verify!' do
     subject(:adapter) { ActiveRecord::Base.clickhouse_connection(config) }
@@ -291,9 +412,12 @@ RSpec.describe 'Connection hardening' do
         end
 
         it 'retries a streamed query once and succeeds' do
-          streaming_response = instance_double(Net::HTTPResponse, code: '200')
+          streaming_response = instance_double(Net::HTTPResponse, code: '200', '[]': nil)
           allow(streaming_response).to receive(:read_body).and_yield("id\n1\n")
-          allow(http_connection).to receive(:request) { |_request, _sql, &callback| callback.call(streaming_response) }
+          allow(http_connection).to receive(:request) do |_request, _sql, &callback|
+            callback.call(streaming_response)
+            streaming_response
+          end
 
           file = adapter.execute_to_file('SELECT 1')
 
@@ -329,6 +453,7 @@ RSpec.describe 'Connection hardening' do
       it 'raises ActiveRecord::StatementTimeout' do
         response = instance_double(
           Net::HTTPResponse,
+          '[]': nil,
           code: '500',
           body: 'Code: 159. DB::Exception: Timeout exceeded (TIMEOUT_EXCEEDED)'
         )
@@ -342,6 +467,7 @@ RSpec.describe 'Connection hardening' do
       it 'raises ActiveRecord::StatementInvalid' do
         response = instance_double(
           Net::HTTPResponse,
+          '[]': nil,
           code: '400',
           body: 'Code: 62. DB::Exception: Syntax error: failed at position 1 (SYNTAX_ERROR)'
         )
@@ -356,7 +482,7 @@ RSpec.describe 'Connection hardening' do
     include_context 'with a stubbed client'
 
     let(:insert) { 'INSERT INTO t (id) VALUES (1)' }
-    let(:insert_response) { instance_double(Net::HTTPResponse, code: '200', body: '') }
+    let(:insert_response) { instance_double(Net::HTTPResponse, code: '200', body: '', '[]': nil) }
 
     context 'when the connection fails to open, without retry_on_connect_error' do
       it 'does not retry and raises ActiveRecord::ConnectionNotEstablished' do
@@ -382,6 +508,7 @@ RSpec.describe 'Connection hardening' do
       it 'raises ActiveRecord::StatementInvalid' do
         response = instance_double(
           Net::HTTPResponse,
+          '[]': nil,
           code: '400',
           body: 'Code: 168. DB::Exception: AST is too big. Maximum: 50000 (TOO_BIG_AST)'
         )
@@ -440,9 +567,12 @@ RSpec.describe 'Connection hardening' do
     end
 
     it 'does not report a full disk during #execute_to_file as a dropped connection' do
-      streaming_response = instance_double(Net::HTTPResponse, code: '200')
+      streaming_response = instance_double(Net::HTTPResponse, code: '200', '[]': nil)
       allow(streaming_response).to receive(:read_body).and_yield("id\n1\n")
-      allow(http_connection).to receive(:request) { |_request, _sql, &callback| callback.call(streaming_response) }
+      allow(http_connection).to receive(:request) do |_request, _sql, &callback|
+        callback.call(streaming_response)
+        streaming_response
+      end
       allow_any_instance_of(Tempfile).to receive(:write).and_raise(Errno::ENOSPC)
 
       expect { adapter.execute_to_file('SELECT 1') }.to raise_error(ActiveRecord::ActiveRecordError) { |e|
